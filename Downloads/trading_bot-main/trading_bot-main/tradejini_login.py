@@ -39,8 +39,7 @@ def login_tradejini(client_id: str, password: str, totp_secret: str) -> str | No
 
     Returns
     -------
-    str  – access_token on success
-    None – on any failure
+    (str, str)  – (access_token, error_message) where one is None
     """
     try:
         totp = pyotp.TOTP(totp_secret).now()
@@ -70,7 +69,7 @@ def login_tradejini(client_id: str, password: str, totp_secret: str) -> str | No
         if response.status_code == 200:
             if not response.text:
                 logging.error("[LOGIN] Empty response body.")
-                return None
+                return None, "Empty response from broker"
             data  = response.json()
             # Try flat key first, then nested under 'data'
             token = (
@@ -79,18 +78,23 @@ def login_tradejini(client_id: str, password: str, totp_secret: str) -> str | No
             )
             if token:
                 logging.info(f"[LOGIN] Broker login successful for client: {client_id}")
-                # DO NOT log the token itself
-                return token
+                return token, None
             else:
                 logging.error(f"[LOGIN] Token missing in response: {data}")
-                return None
+                return None, f"Token missing: {data.get('message', 'Unknown error')}"
         else:
+            try:
+                err_data = response.json()
+                err_msg = err_data.get("msg") or err_data.get("message") or err_data.get("errmsg") or response.text
+            except:
+                err_msg = response.text
+            
             logging.error(
                 f"[LOGIN] Failed for {client_id} | "
                 f"Status: {response.status_code} | Body: {response.text}"
             )
-            return None
+            return None, f"Broker rejected login: {err_msg}"
 
     except Exception as e:
         logging.error(f"[LOGIN] Exception during Tradejini login: {e}")
-        return None
+        return None, f"System error: {str(e)}"

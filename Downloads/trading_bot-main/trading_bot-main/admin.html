@@ -1,339 +1,414 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Admin Dashboard - CubePlus</title>
+  <title>CubePlus Admin Panel</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <style>
-    body {
-      font-family: 'Inter', sans-serif;
-      background: #0d0f14;
-      color: #e2e8f0;
-      margin: 0;
-      padding: 20px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-    }
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Inter',sans-serif;background:#080b12;color:#e2e8f0;min-height:100vh}
 
-    h1 {
-      background: linear-gradient(135deg, #f43f5e, #f97316);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      margin-bottom: 30px;
-      font-weight: 700;
-    }
+    /* ── Nav ── */
+    .topbar{background:#0d1117;border-bottom:1px solid #1e293b;padding:14px 28px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+    .topbar-brand{font-size:1.1rem;font-weight:700;background:linear-gradient(135deg,#f43f5e,#f97316);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+    .topbar-right{display:flex;align-items:center;gap:12px}
+    #admin-badge{font-size:.8rem;color:#64748b}
+    #logout-btn{display:none;padding:6px 14px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#e2e8f0;cursor:pointer;font-size:.85rem;transition:.2s}
+    #logout-btn:hover{background:#334155}
 
-    .card {
-      background: #161b26;
-      border: 1px solid #1e293b;
-      border-radius: 16px;
-      padding: 28px;
-      width: 100%;
-      max-width: 900px;
-      margin-bottom: 20px;
-    }
+    /* ── Layout ── */
+    .container{max-width:1100px;margin:0 auto;padding:28px 20px}
 
-    input {
-      width: 100%;
-      padding: 12px;
-      margin-bottom: 15px;
-      background: #0d0f14;
-      border: 1px solid #1e293b;
-      color: white;
-      border-radius: 8px;
-      font-size: 1rem;
-    }
+    /* ── Login card ── */
+    #login-section{max-width:380px;margin:80px auto 0}
+    .card{background:#0d1117;border:1px solid #1e293b;border-radius:16px;padding:28px}
+    .card h2{font-size:1rem;color:#64748b;margin-bottom:20px;font-weight:500}
+    input{width:100%;padding:11px 14px;background:#080b12;border:1px solid #1e293b;color:#e2e8f0;border-radius:8px;font-size:.9rem;margin-bottom:14px;outline:none;transition:.2s}
+    input:focus{border-color:#3b82f6}
+    .btn{padding:9px 18px;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:.85rem;color:#fff;transition:.2s;display:inline-flex;align-items:center;gap:6px}
+    .btn:hover{opacity:.88;transform:translateY(-1px)}
+    .btn-primary{background:linear-gradient(135deg,#3b82f6,#2563eb)}
+    .btn-success{background:linear-gradient(135deg,#10b981,#059669)}
+    .btn-danger{background:linear-gradient(135deg,#ef4444,#dc2626)}
+    .btn-warn{background:linear-gradient(135deg,#f59e0b,#d97706)}
+    .btn-ghost{background:#1e293b;border:1px solid #334155}
+    .btn-full{width:100%;justify-content:center;padding:12px}
+    #login-msg{color:#f43f5e;font-size:.85rem;margin-top:8px;min-height:18px}
 
-    button {
-      padding: 8px 16px;
-      border: none;
-      border-radius: 6px;
-      cursor: pointer;
-      font-weight: 600;
-      color: white;
-      transition: 0.2s;
-    }
+    /* ── Users table ── */
+    #dashboard-section{display:none}
+    .section-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px}
+    .section-title{font-size:1.15rem;font-weight:600}
+    .badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:.75rem;font-weight:600}
+    .badge-pending{background:#2d1f00;color:#fbbf24}
+    .badge-approved{background:#002d1f;color:#10b981}
+    .badge-blocked{background:#2d0000;color:#ef4444}
+    .badge-open{background:#002d1f;color:#10b981}
+    .badge-closed{background:#1e293b;color:#94a3b8}
 
-    button:hover {
-      opacity: 0.9;
-    }
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:13px 12px;text-align:left;font-size:.875rem;border-bottom:1px solid #1e293b}
+    th{color:#64748b;font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;font-weight:500}
+    tr:hover td{background:rgba(255,255,255,.02)}
+    .mono{font-family:monospace;font-size:.8rem;color:#94a3b8}
+    .actions{display:flex;gap:6px;flex-wrap:wrap}
 
-    .btn-primary {
-      background: #3b82f6;
-    }
+    /* ── User detail drawer ── */
+    #detail-panel{display:none;margin-top:24px;border:1px solid #1e293b;border-radius:16px;overflow:hidden}
+    .detail-header{background:#0d1117;padding:16px 22px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #1e293b}
+    .detail-header h3{font-size:1rem;font-weight:600}
+    .tabs{display:flex;gap:0;border-bottom:1px solid #1e293b;background:#0d1117}
+    .tab-btn{padding:13px 22px;background:none;border:none;color:#64748b;cursor:pointer;font-size:.88rem;font-weight:500;border-bottom:2px solid transparent;transition:.15s}
+    .tab-btn.active{color:#e2e8f0;border-bottom-color:#3b82f6}
+    .tab-content{padding:20px 22px;background:#080b12;display:none;min-height:200px}
+    .tab-content.active{display:block}
 
-    .btn-success {
-      background: #10b981;
-    }
+    /* Errors tab */
+    .error-row{display:flex;gap:14px;align-items:flex-start;padding:12px 0;border-bottom:1px solid #0d1117}
+    .error-row:last-child{border-bottom:none}
+    .error-icon{font-size:1.1rem;flex-shrink:0;margin-top:2px}
+    .error-type{font-size:.78rem;font-weight:700;letter-spacing:.04em}
+    .error-msg{font-size:.85rem;color:#cbd5e1;margin-top:3px}
+    .error-time{font-size:.75rem;color:#475569;margin-top:4px}
+    .sev-error .error-type{color:#f43f5e}
+    .sev-critical .error-type{color:#ff0050}
+    .sev-warning .error-type{color:#f59e0b}
+    .sev-info .error-type{color:#3b82f6}
+    .raw-toggle{font-size:.72rem;color:#3b82f6;cursor:pointer;margin-top:4px;display:inline-block}
+    .raw-pre{background:#0d1117;border:1px solid #1e293b;border-radius:6px;padding:10px;font-size:.72rem;font-family:monospace;white-space:pre-wrap;word-break:break-all;color:#94a3b8;margin-top:6px;display:none}
 
-    .btn-danger {
-      background: #ef4444;
-    }
+    /* Trades tab */
+    .pnl-positive{color:#10b981;font-weight:600}
+    .pnl-negative{color:#f43f5e;font-weight:600}
 
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 20px;
-    }
+    /* Misc */
+    .empty-state{text-align:center;padding:40px 0;color:#475569;font-size:.9rem}
+    .empty-state span{font-size:2rem;display:block;margin-bottom:8px}
+    .loading{text-align:center;padding:30px;color:#475569;font-size:.85rem}
 
-    th,
-    td {
-      text-align: left;
-      padding: 14px 12px;
-      border-bottom: 1px solid #1e293b;
-      font-size: 0.9rem;
-    }
+    /* Toast */
+    #toast{position:fixed;bottom:24px;right:24px;background:#1e293b;border-left:4px solid #3b82f6;color:#e2e8f0;padding:12px 18px;border-radius:10px;font-size:.88rem;opacity:0;transition:opacity .3s;z-index:999;pointer-events:none;max-width:320px}
+    #toast.show{opacity:1}
 
-    th {
-      color: #94a3b8;
-      font-size: 0.8rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-
-    .status-pending {
-      color: #fbbf24;
-      font-weight: 600;
-    }
-
-    .status-approved {
-      color: #10b981;
-      font-weight: 600;
-    }
-
-    .status-blocked {
-      color: #ef4444;
-      font-weight: 600;
-    }
-
-    .hidden {
-      display: none;
-    }
-
-    .btn-warn {
-      background: #f59e0b;
-    }
-
-    .btn-sm {
-      padding: 5px 10px;
-      font-size: 0.78rem;
-    }
-
-    #toast {
-      position: fixed;
-      bottom: 24px;
-      right: 24px;
-      background: #1e293b;
-      color: #e2e8f0;
-      padding: 12px 20px;
-      border-radius: 10px;
-      border-left: 4px solid #3b82f6;
-      font-size: 0.9rem;
-      opacity: 0;
-      transition: opacity 0.3s;
-      z-index: 999;
-    }
-
-    #toast.show {
-      opacity: 1;
-    }
+    /* Refresh spinner */
+    .spin{display:inline-block;animation:spin 1s linear infinite;font-size:.8rem}
+    @keyframes spin{to{transform:rotate(360deg)}}
   </style>
 </head>
-
 <body>
-  <h1>CubePlus Admin Panel</h1>
 
-  <div id="login-section" class="card" style="max-width: 400px;">
-    <h2 style="margin-top: 0; color: #94a3b8;">Admin Login</h2>
-    <input type="text" id="admin-username" placeholder="Username">
-    <input type="password" id="admin-password" placeholder="Password">
-    <button class="btn-primary" style="width: 100%; padding: 12px;" onclick="adminLogin()">Login</button>
-    <div id="login-msg" style="color: #ef4444; margin-top: 10px; font-size: 0.9rem;"></div>
+<div class="topbar">
+  <span class="topbar-brand">⚡ CubePlus Admin</span>
+  <div class="topbar-right">
+    <span id="admin-badge"></span>
+    <button id="logout-btn" onclick="adminLogout()">Logout</button>
   </div>
+</div>
 
-  <div id="dashboard-section" class="card hidden">
-    <div
-      style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 15px;">
-      <h2 style="margin: 0;">Users Dashboard</h2>
-      <button class="btn-primary" onclick="adminLogout()">Logout</button>
+<div class="container">
+  <!-- LOGIN -->
+  <div id="login-section">
+    <div class="card">
+      <h2>Admin Login</h2>
+      <input type="text" id="admin-username" placeholder="Username" onkeydown="if(event.key==='Enter')adminLogin()">
+      <input type="password" id="admin-password" placeholder="Password" onkeydown="if(event.key==='Enter')adminLogin()">
+      <button class="btn btn-primary btn-full" onclick="adminLogin()">Login</button>
+      <div id="login-msg"></div>
     </div>
-    <table>
-      <thead>
-        <tr>
-          <th>User ID</th>
-          <th>Name</th>
-          <th>Phone</th>
-          <th>Status</th>
-          <th>Bot Active</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody id="users-table">
-        <!-- populated via js -->
-      </tbody>
-    </table>
   </div>
 
-  <div id="toast"></div>
+  <!-- DASHBOARD -->
+  <div id="dashboard-section">
+    <div class="section-header">
+      <span class="section-title">Users Dashboard</span>
+      <button class="btn btn-ghost" onclick="fetchUsers()"><span id="refresh-icon">↻</span> Refresh</button>
+    </div>
 
-  <script>
-    let adminToken = localStorage.getItem('admin_token');
-    let refreshInterval = null;
+    <div class="card" style="padding:0;overflow:hidden">
+      <table>
+        <thead>
+          <tr>
+            <th>User ID</th>
+            <th>Name</th>
+            <th>Phone</th>
+            <th>Status</th>
+            <th>Bot</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="users-table"><tr><td colspan="6" class="loading">Loading users…</td></tr></tbody>
+      </table>
+    </div>
 
-    window.onload = () => {
-      if (adminToken) showDashboard();
-    };
+    <!-- PER-USER DETAIL PANEL -->
+    <div id="detail-panel">
+      <div class="detail-header">
+        <h3 id="detail-title">User Details</h3>
+        <button class="btn btn-ghost" style="padding:5px 12px;font-size:.8rem" onclick="closeDetail()">✕ Close</button>
+      </div>
+      <div class="tabs">
+        <button class="tab-btn active" id="tab-errors-btn" onclick="switchTab('errors')">📛 Errors</button>
+        <button class="tab-btn" id="tab-trades-btn" onclick="switchTab('trades')">💰 Trades</button>
+      </div>
+      <div id="tab-errors" class="tab-content active">
+        <div id="errors-body" class="loading">Loading…</div>
+      </div>
+      <div id="tab-trades" class="tab-content">
+        <div id="trades-body" class="loading">Loading…</div>
+      </div>
+    </div>
+  </div>
+</div>
 
-    async function adminLogin() {
-      const u = document.getElementById('admin-username').value;
-      const p = document.getElementById('admin-password').value;
-      try {
-        const res = await fetch('/admin/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: u, password: p })
-        });
-        const data = await res.json();
-        if (data.status === 'success') {
-          adminToken = data.admin_token;
-          localStorage.setItem('admin_token', adminToken);
-          showDashboard();
-        } else {
-          document.getElementById('login-msg').textContent = data.error || 'Login failed';
-        }
-      } catch (e) {
-        document.getElementById('login-msg').textContent = 'Server connection error';
-      }
+<div id="toast"></div>
+
+<script>
+let adminToken = localStorage.getItem('admin_token');
+let refreshInterval = null;
+let activeDetailUser = null;
+let activeTab = 'errors';
+
+window.onload = () => {
+  if (adminToken) showDashboard();
+};
+
+// ── Auth ──────────────────────────────────────────────────────
+async function adminLogin() {
+  const u = document.getElementById('admin-username').value.trim();
+  const p = document.getElementById('admin-password').value;
+  document.getElementById('login-msg').textContent = '';
+  try {
+    const res = await fetch('/admin/login', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({username: u, password: p})
+    });
+    const data = await res.json();
+    if (data.status === 'success') {
+      adminToken = data.admin_token;
+      localStorage.setItem('admin_token', adminToken);
+      showDashboard();
+    } else {
+      document.getElementById('login-msg').textContent = data.error || 'Login failed';
     }
+  } catch {
+    document.getElementById('login-msg').textContent = 'Server connection error';
+  }
+}
 
-    function adminLogout() {
-      localStorage.removeItem('admin_token');
-      adminToken = null;
-      document.getElementById('login-section').classList.remove('hidden');
-      document.getElementById('dashboard-section').classList.add('hidden');
-      if (refreshInterval) clearInterval(refreshInterval);
+function adminLogout() {
+  localStorage.removeItem('admin_token');
+  adminToken = null;
+  clearInterval(refreshInterval);
+  document.getElementById('login-section').style.display = 'block';
+  document.getElementById('dashboard-section').style.display = 'none';
+  document.getElementById('logout-btn').style.display = 'none';
+  document.getElementById('admin-badge').textContent = '';
+}
+
+function showDashboard() {
+  document.getElementById('login-section').style.display = 'none';
+  document.getElementById('dashboard-section').style.display = 'block';
+  document.getElementById('logout-btn').style.display = 'inline-block';
+  document.getElementById('admin-badge').textContent = adminToken.replace('admin_','') + ' (admin)';
+  fetchUsers();
+  refreshInterval = setInterval(fetchUsers, 8000);
+}
+
+// ── Users table ───────────────────────────────────────────────
+async function fetchUsers() {
+  const icon = document.getElementById('refresh-icon');
+  icon.className = 'spin'; icon.textContent = '↻';
+  try {
+    const res = await fetch(`/admin/dashboard?admin_token=${adminToken}`);
+    const data = await res.json();
+    if (data.error === 'Unauthorized') { adminLogout(); return; }
+    const tbody = document.getElementById('users-table');
+    if (!data.users || !data.users.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-state"><span>👤</span>No users yet</td></tr>';
+      return;
     }
+    tbody.innerHTML = data.users.map(u => {
+      const approveBtn  = u.status === 'pending'  ? `<button class="btn btn-success" style="padding:5px 10px;font-size:.78rem" onclick="approveUser('${u.user_id}')">✅ Approve</button>` : '';
+      const blockBtn    = u.status === 'approved' ? `<button class="btn btn-warn"    style="padding:5px 10px;font-size:.78rem" onclick="disapproveUser('${u.user_id}')">🚫 Block</button>` : '';
+      const botBtn      = u.bot_running
+        ? `<button class="btn btn-danger"  style="padding:5px 10px;font-size:.78rem" onclick="stopBot('${u.user_id}')">⏹ Stop</button>`
+        : (u.status!=='blocked' ? `<button class="btn btn-primary" style="padding:5px 10px;font-size:.78rem" onclick="startBot('${u.user_id}')">▶ Start</button>` : '');
+      const detailBtn   = `<button class="btn btn-ghost" style="padding:5px 10px;font-size:.78rem" onclick="openDetail('${u.user_id}','${u.name}')">🔍 View</button>`;
+      const deleteBtn   = `<button class="btn btn-danger" style="padding:5px 10px;font-size:.78rem" onclick="deleteUser('${u.user_id}','${u.name}')">🗑</button>`;
+      return `<tr>
+        <td class="mono">${u.user_id}</td>
+        <td>${u.name}</td>
+        <td>${u.phone}</td>
+        <td><span class="badge badge-${u.status}">${u.status.toUpperCase()}</span></td>
+        <td>${u.bot_running ? '🟢 Running' : '⚫ Idle'}</td>
+        <td><div class="actions">${approveBtn}${blockBtn}${botBtn}${detailBtn}${deleteBtn}</div></td>
+      </tr>`;
+    }).join('');
+  } catch { showToast('Failed to fetch users', '#ef4444'); }
+  icon.className = ''; icon.textContent = '↻';
+}
 
-    async function showDashboard() {
-      document.getElementById('login-section').classList.add('hidden');
-      document.getElementById('dashboard-section').classList.remove('hidden');
-      fetchUsers();
-      refreshInterval = setInterval(fetchUsers, 5000);
+// ── User actions ──────────────────────────────────────────────
+async function postAdmin(endpoint, body) {
+  const res  = await fetch(endpoint, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({admin_token: adminToken, ...body})});
+  return res.json();
+}
+
+async function approveUser(uid) {
+  const d = await postAdmin('/admin/approve', {user_id: uid});
+  showToast(d.status || d.error, d.error ? '#ef4444' : '#10b981');
+  fetchUsers();
+}
+
+async function disapproveUser(uid) {
+  if (!confirm(`Block user ${uid}? Their bot will stop immediately.`)) return;
+  const d = await postAdmin('/admin/disapprove-user', {user_id: uid});
+  showToast(d.status || d.error, d.error ? '#ef4444' : '#f59e0b');
+  fetchUsers();
+}
+
+async function deleteUser(uid, name) {
+  if (!confirm(`⚠️ PERMANENTLY DELETE "${name}" (${uid})? Cannot be undone.`)) return;
+  const res  = await fetch('/admin/delete-user', {method:'DELETE', headers:{'Content-Type':'application/json'}, body: JSON.stringify({admin_token: adminToken, user_id: uid})});
+  const d    = await res.json();
+  showToast(d.status || d.error, d.error ? '#ef4444' : '#10b981');
+  if (activeDetailUser === uid) closeDetail();
+  fetchUsers();
+}
+
+async function startBot(uid) {
+  const d = await postAdmin('/admin/start-bot', {user_id: uid});
+  showToast(d.status || d.error, d.error ? '#ef4444' : '#3b82f6');
+  fetchUsers();
+}
+
+async function stopBot(uid) {
+  const d = await postAdmin('/admin/stop-bot', {user_id: uid});
+  showToast(d.status || d.info || d.error, d.error ? '#ef4444' : '#10b981');
+  fetchUsers();
+}
+
+// ── Detail panel ──────────────────────────────────────────────
+function openDetail(uid, name) {
+  activeDetailUser = uid;
+  document.getElementById('detail-title').textContent = `👤 ${name}  ·  ${uid}`;
+  document.getElementById('detail-panel').style.display = 'block';
+  document.getElementById('detail-panel').scrollIntoView({behavior:'smooth', block:'start'});
+  switchTab(activeTab);
+}
+
+function closeDetail() {
+  document.getElementById('detail-panel').style.display = 'none';
+  activeDetailUser = null;
+}
+
+function switchTab(tab) {
+  activeTab = tab;
+  document.getElementById('tab-errors-btn').classList.toggle('active', tab === 'errors');
+  document.getElementById('tab-trades-btn').classList.toggle('active', tab === 'trades');
+  document.getElementById('tab-errors').classList.toggle('active', tab === 'errors');
+  document.getElementById('tab-trades').classList.toggle('active', tab === 'trades');
+  if (!activeDetailUser) return;
+  if (tab === 'errors') loadErrors(activeDetailUser);
+  else                  loadTrades(activeDetailUser);
+}
+
+// ── Errors tab ────────────────────────────────────────────────
+async function loadErrors(uid) {
+  const body = document.getElementById('errors-body');
+  body.innerHTML = '<div class="loading">Fetching errors…</div>';
+  try {
+    const res  = await fetch(`/admin/user-errors?admin_token=${adminToken}&user_id=${uid}&limit=100`);
+    const data = await res.json();
+    if (data.error) { body.innerHTML = `<div class="empty-state"><span>⚠️</span>${data.error}</div>`; return; }
+    if (!data.errors || !data.errors.length) {
+      body.innerHTML = '<div class="empty-state"><span>✅</span>No errors recorded for this user</div>'; return;
     }
+    body.innerHTML = data.errors.map((e, i) => {
+      const sev   = (e.severity || 'ERROR').toLowerCase();
+      const icons = {critical:'🚨', error:'❌', warning:'⚠️', info:'ℹ️'};
+      const icon  = icons[sev] || '❌';
+      const ts    = new Date(e.created_at).toLocaleString('en-IN', {timeZone:'Asia/Kolkata', hour12:false});
+      const rawId = `raw-${i}`;
+      const rawHtml = e.raw_response
+        ? `<span class="raw-toggle" onclick="toggleRaw('${rawId}')">show raw ▾</span>
+           <pre class="raw-pre" id="${rawId}">${JSON.stringify(e.raw_response, null, 2)}</pre>`
+        : '';
+      return `<div class="error-row sev-${sev}">
+        <div class="error-icon">${icon}</div>
+        <div style="flex:1">
+          <div class="error-type">${e.error_type}</div>
+          <div class="error-msg">${e.error_message}</div>
+          <div class="error-time">${ts} · ${e.severity || 'ERROR'}</div>
+          ${rawHtml}
+        </div>
+      </div>`;
+    }).join('');
+  } catch { body.innerHTML = '<div class="empty-state"><span>🔴</span>Failed to load errors</div>'; }
+}
 
-    async function fetchUsers() {
-      if (!adminToken) return;
-      try {
-        const res = await fetch(`/admin/dashboard?admin_token=${adminToken}`);
-        const data = await res.json();
-        if (data.users) {
-          const tbody = document.getElementById('users-table');
-          tbody.innerHTML = data.users.map(u => {
-            const isBlocked = u.status === 'blocked';
-            const isPending = u.status === 'pending';
-            const isApproved = u.status === 'approved';
+function toggleRaw(id) {
+  const el = document.getElementById(id);
+  const show = el.style.display === 'block';
+  el.style.display = show ? 'none' : 'block';
+  el.previousElementSibling.textContent = show ? 'show raw ▾' : 'hide raw ▴';
+}
 
-            const approveBtn = isPending
-              ? `<button class="btn-success btn-sm" onclick="approveUser('${u.user_id}')">✅ Approve</button>`
-              : '';
-            const disapproveBtn = isApproved
-              ? `<button class="btn-warn btn-sm" onclick="disapproveUser('${u.user_id}')">🚫 Block</button>`
-              : '';
-            const botBtn = u.bot_running
-              ? `<button class="btn-danger btn-sm" onclick="stopBot('${u.user_id}')">⏹ Stop Bot</button>`
-              : (!isBlocked ? `<button class="btn-primary btn-sm" onclick="startBot('${u.user_id}')">▶ Start Bot</button>` : '');
-            const deleteBtn = `<button class="btn-danger btn-sm" onclick="deleteUser('${u.user_id}', '${u.name}')">🗑 Delete</button>`;
-
-            return `
-              <tr>
-                <td style="font-family: monospace; font-size:0.85rem;">${u.user_id}</td>
-                <td>${u.name}</td>
-                <td>${u.phone}</td>
-                <td class="status-${u.status}">${u.status.toUpperCase()}</td>
-                <td>${u.bot_running ? '🟢 Running' : '⚫ Idle'}</td>
-                <td style="display: flex; gap: 6px; flex-wrap: wrap;">
-                  ${approveBtn}${disapproveBtn}${botBtn}${deleteBtn}
-                </td>
-              </tr>`;
-          }).join('');
-        } else if (data.error === "Unauthorized") {
-          adminLogout();
-        }
-      } catch (e) {
-        console.error("Failed to fetch dashboard");
-      }
+// ── Trades tab ────────────────────────────────────────────────
+async function loadTrades(uid) {
+  const body = document.getElementById('trades-body');
+  body.innerHTML = '<div class="loading">Fetching trades…</div>';
+  try {
+    const res  = await fetch(`/admin/user-trades?admin_token=${adminToken}&user_id=${uid}&limit=200`);
+    const data = await res.json();
+    if (data.error) { body.innerHTML = `<div class="empty-state"><span>⚠️</span>${data.error}</div>`; return; }
+    if (!data.trades || !data.trades.length) {
+      body.innerHTML = '<div class="empty-state"><span>📭</span>No trades recorded yet</div>'; return;
     }
+    const rows = data.trades.map(t => {
+      const pnl     = t.exit_price ? ((t.exit_price - t.entry_price) * t.qty).toFixed(2) : '—';
+      const pnlCls  = pnl === '—' ? '' : (parseFloat(pnl) >= 0 ? 'pnl-positive' : 'pnl-negative');
+      const pnlStr  = pnl === '—' ? '—' : `${pnl >= 0 ? '+' : ''}₹${pnl}`;
+      const ts      = new Date(t.created_at).toLocaleString('en-IN', {timeZone:'Asia/Kolkata', hour12:false});
+      const closedTs= t.closed_at ? new Date(t.closed_at).toLocaleTimeString('en-IN', {timeZone:'Asia/Kolkata', hour12:false}) : '—';
+      return `<tr>
+        <td style="font-size:.78rem;color:#94a3b8">${ts}</td>
+        <td style="font-weight:600">${t.symbol}</td>
+        <td>${t.side}</td>
+        <td>${t.qty}</td>
+        <td>${t.entry_price}</td>
+        <td>${t.exit_price ?? '—'}</td>
+        <td>${t.sl}</td>
+        <td>${t.target}</td>
+        <td class="${pnlCls}">${pnlStr}</td>
+        <td><span class="badge badge-${t.status.toLowerCase()}">${t.status}</span></td>
+        <td style="font-size:.78rem;color:#64748b">${closedTs}</td>
+      </tr>`;
+    }).join('');
+    body.innerHTML = `
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr>
+            <th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th>
+            <th>Entry</th><th>Exit</th><th>SL</th><th>Target</th>
+            <th>P&amp;L</th><th>Status</th><th>Closed</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  } catch { body.innerHTML = '<div class="empty-state"><span>🔴</span>Failed to load trades</div>'; }
+}
 
-    async function approveUser(userId) {
-      const res = await fetch('/admin/approve', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ admin_token: adminToken, user_id: userId })
-      });
-      const data = await res.json();
-      showToast(data.status || data.error, data.error ? '#ef4444' : '#10b981');
-      fetchUsers();
-    }
-
-    async function disapproveUser(userId) {
-      if (!confirm(`Block user ${userId}?\nThis will stop their bot immediately and prevent re-login.`)) return;
-      const res = await fetch('/admin/disapprove-user', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ admin_token: adminToken, user_id: userId })
-      });
-      const data = await res.json();
-      showToast(data.status || data.error, data.error ? '#ef4444' : '#f59e0b');
-      fetchUsers();
-    }
-
-    async function deleteUser(userId, name) {
-      if (!confirm(`⚠️ PERMANENTLY DELETE user "${name}" (${userId})?\nThis cannot be undone.`)) return;
-      const res = await fetch('/admin/delete-user', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ admin_token: adminToken, user_id: userId })
-      });
-      const data = await res.json();
-      showToast(data.status || data.error, data.error ? '#ef4444' : '#10b981');
-      fetchUsers();
-    }
-
-    async function startBot(userId) {
-      const res = await fetch('/admin/start-bot', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ admin_token: adminToken, user_id: userId })
-      });
-      const data = await res.json();
-      showToast(data.status || data.error, data.error ? '#ef4444' : '#3b82f6');
-      fetchUsers();
-    }
-
-    async function stopBot(userId) {
-      const res = await fetch('/admin/stop-bot', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ admin_token: adminToken, user_id: userId })
-      });
-      const data = await res.json();
-      showToast(data.status || data.info || data.error, data.error ? '#ef4444' : '#10b981');
-      fetchUsers();
-    }
-
-    let _toastTimer;
-    function showToast(msg, color = '#3b82f6') {
-      const t = document.getElementById('toast');
-      t.textContent = msg;
-      t.style.borderLeftColor = color;
-      t.classList.add('show');
-      clearTimeout(_toastTimer);
-      _toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
-    }
-  </script>
+// ── Toast ─────────────────────────────────────────────────────
+let _tt;
+function showToast(msg, color='#3b82f6') {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.style.borderLeftColor = color;
+  t.classList.add('show'); clearTimeout(_tt);
+  _tt = setTimeout(() => t.classList.remove('show'), 3500);
+}
+</script>
 </body>
-
 </html>

@@ -96,10 +96,10 @@ def connect_broker(creds: BrokerCredentials):
     user_id = active_sessions[creds.session_token]["user_id"]
     print(f"[BROKER] Connect request for user: {user_id} | client: {creds.client_id}")
 
-    token = login_tradejini(creds.client_id, creds.password, creds.totp_secret)
+    token, err_msg = login_tradejini(creds.client_id, creds.password, creds.totp_secret)
 
     if not token:
-        return {"error": "Tradejini broker login failed. Check your client ID, PIN and TOTP."}
+        return {"error": f"Tradejini login failed: {err_msg}"}
 
     store_session(user_id, creds.client_id, token)
     return {"status": "Broker connected successfully", "user_id": user_id}
@@ -348,3 +348,85 @@ def admin_delete_user(req: AdminActionReq):
     except Exception as e:
         logging.error(f"[ADMIN] Delete error for {req.user_id}: {e}")
         return {"error": f"Supabase delete failed: {e}"}
+
+
+# ── Admin: Error logs per user ────────────────────────────────
+
+@app.get("/admin/user-errors")
+def admin_user_errors(
+    admin_token: str,
+    user_id: str,
+    limit: int = 100,
+    offset: int = 0,
+):
+    """
+    Return the latest errors for a specific user, newest first.
+    Optional query params: limit (default 100) and offset (default 0)
+    for cursor-style pagination.
+    """
+    if admin_token not in admin_sessions:
+        return {"error": "Unauthorized"}
+
+    try:
+        res = (
+            supabase.table("user_errors")
+            .select("id, error_type, error_message, severity, raw_response, created_at")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .range(offset, offset + limit - 1)
+            .execute()
+        )
+        return {
+            "user_id": user_id,
+            "total":   len(res.data),
+            "offset":  offset,
+            "limit":   limit,
+            "errors":  res.data,
+        }
+    except Exception as e:
+        logging.error(f"[ADMIN] user-errors fetch failed for {user_id}: {e}")
+        return {"error": str(e)}
+
+
+# ── Admin: Trade history per user ────────────────────────────
+
+@app.get("/admin/user-trades")
+def admin_user_trades(
+    admin_token: str,
+    user_id: str,
+    status: str | None = None,   # optional filter: OPEN / CLOSED
+    limit: int = 200,
+    offset: int = 0,
+):
+    """
+    Return all trades for a specific user (both OPEN and CLOSED).
+    Optional ?status=OPEN or ?status=CLOSED filter.
+    """
+    if admin_token not in admin_sessions:
+        return {"error": "Unauthorized"}
+
+    try:
+        query = (
+            supabase.table("trades")
+            .select(
+                "id, symbol, side, qty, entry_price, exit_price, "
+                "sl, target, status, created_at, closed_at"
+            )
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+        )
+
+        if status and status.upper() in ("OPEN", "CLOSED"):
+            query = query.eq("status", status.upper())
+
+        res = query.range(offset, offset + limit - 1).execute()
+        return {
+            "user_id": user_id,
+            "total":   len(res.data),
+            "offset":  offset,
+            "limit":   limit,
+            "trades":  res.data,
+        }
+    except Exception as e:
+        logging.error(f"[ADMIN] user-trades fetch failed for {user_id}: {e}")
+        return {"error": str(e)}

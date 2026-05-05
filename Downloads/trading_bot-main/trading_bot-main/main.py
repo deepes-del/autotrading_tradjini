@@ -17,6 +17,7 @@ import data_fetcher
 import strategy
 import order_manager
 from session_manager import get_session, set_active, get_setup, set_setup, clear_setup
+from error_logger import log_error
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
@@ -47,6 +48,65 @@ def add_log(user_id: str, message: str) -> None:
         user_logs[user_id].pop(0)
     user_logs[user_id].append(message)
     print(f"[LOG][{user_id}] {message}")
+
+
+# ── Trade persistence helpers ────────────────────────────────
+
+def store_trade(
+    user_id: str,
+    symbol: str,
+    qty: int,
+    entry_price: float,
+    sl: float,
+    target: float,
+    side: str = "BUY",
+) -> None:
+    """
+    Insert a confirmed (broker-acknowledged) trade into Supabase.
+    Called ONLY after place_buy_order() returns success=True.
+    """
+    try:
+        from supabase_client import supabase
+        supabase.table("trades").insert({
+            "user_id":         user_id,
+            "symbol":          symbol,
+            "side":            side,
+            "qty":             qty,
+            "entry_price":     round(float(entry_price), 2),
+            "sl":              round(float(sl), 2),
+            "target":          round(float(target), 2),
+            "status":          "OPEN",
+        }).execute()
+        logging.info(f"[TRADE STORED] user={user_id} sym={symbol}")
+    except Exception as exc:
+        logging.error(f"[TRADE STORE FAIL] user={user_id}: {exc}")
+        log_error(user_id, "TRADE_STORE_FAILED", str(exc), severity="ERROR")
+
+
+def close_trade(
+    user_id: str,
+    exit_price: float,
+    reason: str = "CLOSED",
+) -> None:
+    """
+    Mark a trade CLOSED in Supabase with the exit price and timestamp.
+    Called on target hit, SL hit, or EOD square-off.
+    `reason` is logged but not stored (status is always CLOSED).
+    """
+    try:
+        from supabase_client import supabase
+        supabase.table("trades").update({
+            "exit_price": round(float(exit_price), 2),
+            "status":     "CLOSED",
+            "closed_at":  datetime.datetime.utcnow().isoformat(),
+        }).eq("user_id", user_id).eq("status", "OPEN").execute()
+        logging.info(
+            f"[TRADE CLOSED] user={user_id} "
+            f"exit={exit_price} reason={reason}"
+        )
+    except Exception as exc:
+        logging.error(f"[TRADE CLOSE FAIL] user={user_id}: {exc}")
+        log_error(user_id, "TRADE_CLOSE_FAILED", str(exc), severity="ERROR")
 
 
 # ── Public API ───────────────────────────────────────────────
@@ -215,9 +275,26 @@ def _run_bot_logic(user_config: dict) -> None:
                     add_log(user_id, f"✅ EOD SELL executed | Order ID: {sell_res['order_id']}")
                     add_log(user_id, "📌 Trade closed (EOD Square-off)")
                     logging.info(f"[EOD] SELL confirmed | Order: {sell_res['order_id']}")
+                    # ── Close trade in Supabase ───────────────
+                    current_ltp = data_fetcher.get_ltp(
+                        broker_ctx, "NFO",
+                        active_trade["opt_sym"], active_trade["opt_tok"]
+                    )
+                    eod_exit_price = float(current_ltp) if current_ltp else active_trade["entry_price"]
+                    close_trade(
+                        user_id,
+                        eod_exit_price,
+                        reason="EOD_SQUAREOFF",
+                    )
                 else:
                     add_log(user_id, f"❌ EOD square-off FAILED — MANUAL ACTION REQUIRED! | Reason: {sell_res.get('message')}")
                     logging.error(f"[EOD CRITICAL] Could not exit position for user {user_id}! msg={sell_res.get('message')}")
+                    log_error(
+                        user_id, "EOD_SQUAREOFF_FAILED",
+                        sell_res.get("message", "Unknown"),
+                        raw=sell_res.get("raw"),
+                        severity="CRITICAL",
+                    )
 
                 active_trade = None
                 clear_setup(user_id)
@@ -248,16 +325,31 @@ def _run_bot_logic(user_config: dict) -> None:
             add_log(user_id, f"📊 Candle ({t_str})\nOpen : {latest['open']:.2f}\nHigh : {latest['high']:.2f}\nLow  : {latest['low']:.2f}\nClose: {latest['close']:.2f}")
             add_log(user_id, f"📉 EMA5: {latest['EMA5']:.2f}")
             
+            # 1. Check if there was an active setup before clearing
+            had_old_setup = get_setup(user_id) is not None
+            
+            # 2. RESET SETUP ON NEW CANDLE
+            # ALL previous setups must be discarded
+            clear_setup(user_id)
+            
+            # 3. RE-EVALUATE SETUP
             if is_setup_valid:
                 # Store new setup
                 set_setup(user_id, {"low": s_low, "high": s_high, "ema": s_ema, "time": s_time})
                 add_log(user_id, f"🧠 Setup detected\nLow above EMA → Bullish strength\nWaiting for breakdown below {s_low:.2f}")
             else:
-                add_log(user_id, "❌ No setup — candle not above EMA")
+                # 5. LOGGING FIX
+                if had_old_setup:
+                    add_log(user_id, "❌ Previous setup invalidated")
+                else:
+                    add_log(user_id, "❌ No setup — candle not above EMA")
+                
                 add_log(user_id, "⏳ Waiting for next candle...")
 
-        # ── Expire stale setup (30 mins) ──────────────────────
+        # 4. Fetch the strictly validated setup for the current loop
         setup = get_setup(user_id)
+
+        # ── Expire stale setup (30 mins) ──────────────────────
         if setup:
             # Ensure setup['time'] is compared correctly
             s_time_dt = setup['time']
@@ -286,9 +378,20 @@ def _run_bot_logic(user_config: dict) -> None:
                     )
                     if tgt_res.get("success"):
                         add_log(user_id, f"🎯 Target Hit! SELL confirmed at {current_opt_ltp} | Order: {tgt_res['order_id']}")
+                        close_trade(
+                            user_id,
+                            current_opt_ltp,
+                            reason="TARGET_HIT",
+                        )
                     else:
                         add_log(user_id, f"⚠️ Target reached but SELL failed: {tgt_res.get('message')} — MANUAL EXIT NEEDED")
                         logging.error(f"[TARGET SELL FAIL] user={user_id} msg={tgt_res.get('message')}")
+                        log_error(
+                            user_id, "TARGET_SELL_FAILED",
+                            tgt_res.get("message", "Unknown"),
+                            raw=tgt_res.get("raw"),
+                            severity="ERROR",
+                        )
                     active_trade = None
                     continue
 
@@ -298,6 +401,11 @@ def _run_bot_logic(user_config: dict) -> None:
                     )
                     if not sl_still_active:
                         add_log(user_id, f"🛑 Stoploss Hit at {current_opt_ltp}")
+                        close_trade(
+                            user_id,
+                            current_opt_ltp,
+                            reason="SL_HIT",
+                        )
                         active_trade = None
                         continue
 
@@ -352,8 +460,19 @@ def _run_bot_logic(user_config: dict) -> None:
                             )
 
                             if buy_res.get("success"):
-                                add_log(user_id, f"✅ BUY order placed at {entry_price:.2f} | Order ID: {buy_res['order_id']}")
+                                buy_order_id = buy_res["order_id"]
+                                add_log(user_id, f"✅ BUY order placed at {entry_price:.2f} | Order ID: {buy_order_id}")
                                 add_log(user_id, f"💰 Trade Executed\nSymbol: {opt_sym}\nEntry : {entry_price}\nSL    : {sl_price}\nTarget: {target_price}")
+
+                                # ── Store trade in Supabase ───────────────────
+                                store_trade(
+                                    user_id=user_id,
+                                    symbol=opt_sym,
+                                    qty=trade_qty,
+                                    entry_price=entry_price,
+                                    sl=sl_price,
+                                    target=target_price,
+                                )
 
                                 # ── Place SL order ────────────────────────────
                                 sl_res = order_manager.place_sl_order(
@@ -363,6 +482,12 @@ def _run_bot_logic(user_config: dict) -> None:
                                 if not sl_res.get("success"):
                                     add_log(user_id, f"⚠️ SL order failed: {sl_res.get('message')} — monitor manually")
                                     logging.error(f"[SL FAIL] user={user_id} | msg={sl_res.get('message')}")
+                                    log_error(
+                                        user_id, "SL_ORDER_FAILED",
+                                        sl_res.get("message", "Unknown"),
+                                        raw=sl_res.get("raw"),
+                                        severity="WARNING",
+                                    )
 
                                 # Mark trade active ONLY after confirmed BUY
                                 active_trade = {
@@ -373,6 +498,7 @@ def _run_bot_logic(user_config: dict) -> None:
                                     "sl_price":     sl_price,
                                     "target_price": target_price,
                                     "sl_order_id":  sl_order_id,
+                                    "buy_order_id": buy_order_id,  # needed for close_trade()
                                 }
                                 trades_today += 1
                                 clear_setup(user_id)
@@ -380,6 +506,12 @@ def _run_bot_logic(user_config: dict) -> None:
                                 # BUY failed — do NOT mark trade as active
                                 add_log(user_id, f"❌ BUY order failed: {buy_res.get('message')}")
                                 logging.error(f"[BUY FAIL] user={user_id} | msg={buy_res.get('message')} | raw={buy_res.get('raw')}")
+                                log_error(
+                                    user_id, "ORDER_FAILED",
+                                    buy_res.get("message", "Unknown broker error"),
+                                    raw=buy_res.get("raw"),
+                                    severity="ERROR",
+                                )
                                 clear_setup(user_id)
                         else:
                             add_log(user_id, "❌ Failed to fetch option data")
