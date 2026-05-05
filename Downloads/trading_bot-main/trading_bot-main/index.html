@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CubePlus Trading Bot</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: #0d0f14;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px
+    }
+
+    .container {
+      width: 100%;
+      max-width: 520px
+    }
+
+    h1 {
+      text-align: center;
+      font-size: 1.6rem;
+      font-weight: 700;
+      margin-bottom: 4px;
+      background: linear-gradient(135deg, #6ee7b7, #3b82f6);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent
+    }
+
+    .subtitle {
+      text-align: center;
+      color: #64748b;
+      font-size: .85rem;
+      margin-bottom: 28px
+    }
+
+    .step-indicator {
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      margin-bottom: 24px
+    }
+
+    .step {
+      width: 32px;
+      height: 4px;
+      border-radius: 2px;
+      background: #1e293b;
+      transition: .3s
+    }
+
+    .step.active {
+      background: #3b82f6
+    }
+
+    .step.done {
+      background: #6ee7b7
+    }
+
+    .card {
+      background: #161b26;
+      border: 1px solid #1e293b;
+      border-radius: 16px;
+      padding: 28px;
+      margin-bottom: 16px
+    }
+
+    .card h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 20px;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: .08em
+    }
+
+    .form-group {
+      margin-bottom: 16px
+    }
+
+    label {
+      display: block;
+      font-size: .8rem;
+      font-weight: 500;
+      color: #94a3b8;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: .05em
+    }
+
+    input,
+    select {
+      width: 100%;
+      padding: 10px 14px;
+      background: #0d0f14;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      color: #e2e8f0;
+      font-size: .9rem;
+      outline: none;
+      transition: .2s
+    }
+
+    input:focus,
+    select:focus {
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, .1)
+    }
+
+    select option {
+      background: #161b26
+    }
+
+    .btn {
+      width: 100%;
+      padding: 11px;
+      border: none;
+      border-radius: 8px;
+      font-size: .9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: .2s;
+      margin-top: 4px
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #3b82f6, #6366f1);
+      color: #fff
+    }
+
+    .btn-primary:hover {
+      opacity: .9;
+      transform: translateY(-1px)
+    }
+
+    .btn-success {
+      background: linear-gradient(135deg, #059669, #10b981);
+      color: #fff
+    }
+
+    .btn-success:hover {
+      opacity: .9
+    }
+
+    .btn-danger {
+      background: linear-gradient(135deg, #dc2626, #ef4444);
+      color: #fff
+    }
+
+    .btn-danger:hover {
+      opacity: .9
+    }
+
+    .btn-ghost {
+      background: #1e293b;
+      color: #94a3b8
+    }
+
+    .btn-ghost:hover {
+      background: #263348
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 10px
+    }
+
+    .btn-row .btn {
+      margin-top: 0
+    }
+
+    .msg {
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: .85rem;
+      margin-top: 12px;
+      display: none
+    }
+
+    .msg.success {
+      background: rgba(16, 185, 129, .1);
+      border: 1px solid #059669;
+      color: #6ee7b7
+    }
+
+    .msg.error {
+      background: rgba(239, 68, 68, .1);
+      border: 1px solid #dc2626;
+      color: #fca5a5
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: .75rem;
+      font-weight: 600
+    }
+
+    .badge-connected {
+      background: rgba(16, 185, 129, .15);
+      color: #6ee7b7;
+      border: 1px solid #059669
+    }
+
+    .badge-disconnected {
+      background: rgba(100, 116, 139, .1);
+      color: #64748b;
+      border: 1px solid #334155
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 18px
+    }
+
+    .param-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 16px
+    }
+
+    .param-card {
+      background: #0d0f14;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      padding: 10px 14px
+    }
+
+    .param-card .pk {
+      font-size: .7rem;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: .05em
+    }
+
+    .param-card .pv {
+      font-size: .95rem;
+      font-weight: 600;
+      color: #e2e8f0;
+      margin-top: 2px
+    }
+
+    #logs-box {
+      background: #0a0c10;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      height: 260px;
+      overflow-y: auto;
+      padding: 12px;
+      font-family: 'Courier New', monospace;
+      font-size: .78rem;
+      line-height: 1.7
+    }
+
+    .log-line {
+      color: #6ee7b7;
+      opacity: 0;
+      animation: fadein .3s forwards
+    }
+
+    .log-line.err {
+      color: #fca5a5
+    }
+
+    @keyframes fadein {
+      to {
+        opacity: 1
+      }
+    }
+
+    .hidden {
+      display: none !important
+    }
+
+    .divider {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 14px 0
+    }
+
+    .divider hr {
+      flex: 1;
+      border: none;
+      border-top: 1px solid #1e293b
+    }
+
+    .divider span {
+      color: #334155;
+      font-size: .75rem
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <h1>⚡ CubePlus Trading Bot</h1>
+    <p class="subtitle">Tradejini · Multi-User · Real-Time</p>
+
+    <div class="step-indicator">
+      <div class="step active" id="s1"></div>
+      <div class="step" id="s2"></div>
+      <div class="step" id="s3"></div>
+    </div>
+
+    <!-- STEP 1: Platform Auth -->
+    <div class="card" id="auth-card">
+      <div id="login-view">
+        <h2>Step 1 — Platform Login</h2>
+        <div class="form-group">
+          <label>User ID</label>
+          <input type="text" id="login-userid" placeholder="e.g. DEEP733712">
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" id="login-password" placeholder="••••••••">
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-ghost" onclick="toggleAuthView(false)">Need an account?</button>
+          <button class="btn btn-primary" onclick="handleLogin()">Login →</button>
+        </div>
+      </div>
+
+      <div id="register-view" class="hidden">
+        <h2>Step 1 — Register</h2>
+        <div class="form-group">
+          <label>Full Name</label>
+          <input type="text" id="reg-name" placeholder="Deepesh">
+        </div>
+        <div class="form-group">
+          <label>Age</label>
+          <input type="number" id="reg-age" placeholder="22">
+        </div>
+        <div class="form-group">
+          <label>Occupation</label>
+          <input type="text" id="reg-occ" placeholder="Student">
+        </div>
+        <div class="form-group">
+          <label>Phone Number</label>
+          <input type="text" id="reg-phone" placeholder="7337850344">
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" id="reg-password" placeholder="••••••••">
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-ghost" onclick="toggleAuthView(true)">Back to Login</button>
+          <button class="btn btn-primary" onclick="handleRegister()">Register</button>
+        </div>
+      </div>
+
+      <div class="msg" id="auth-msg"></div>
+    </div>
+
+    <!-- STEP 2: Connect Broker -->
+    <div class="card hidden" id="broker-card">
+      <h2>Step 2 — Connect Tradejini Broker</h2>
+      <div class="form-group">
+        <label>Tradejini Client ID</label>
+        <input type="text" id="client-id" placeholder="e.g. TJ12345">
+      </div>
+      <div class="form-group">
+        <label>Trading PIN</label>
+        <input type="password" id="trading-pin" placeholder="4–6 digit PIN">
+      </div>
+      <div class="form-group">
+        <label>TOTP Secret (Base32)</label>
+        <input type="password" id="totp-secret" placeholder="From authenticator app">
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-ghost" onclick="logout()">← Back to Login</button>
+        <button class="btn btn-primary" onclick="connectBroker()">Connect Broker →</button>
+      </div>
+      <div class="msg" id="broker-msg"></div>
+    </div>
+
+    <!-- STEP 3: Bot Controls -->
+    <div class="card hidden" id="bot-card">
+      <div class="status-row">
+        <h2 style="margin-bottom:0">Step 3 — Bot Controls</h2>
+        <span class="badge badge-connected" id="broker-badge">● Broker Connected</span>
+      </div>
+
+      <div class="param-grid" id="param-display">
+        <div class="param-card">
+          <div class="pk">Index</div>
+          <div class="pv" id="r-index">NIFTY</div>
+        </div>
+        <div class="param-card">
+          <div class="pk">Lots</div>
+          <div class="pv" id="r-lots">1</div>
+        </div>
+        <div class="param-card">
+          <div class="pk">Stop Loss</div>
+          <div class="pv" id="r-sl">Dynamic</div>
+        </div>
+        <div class="param-card">
+          <div class="pk">Target</div>
+          <div class="pv" id="r-target">Dynamic</div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Index</label>
+        <select id="index" onchange="updateParams()">
+          <option value="NIFTY">NIFTY</option>
+          <option value="BANKNIFTY">BANKNIFTY</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Mode</label>
+        <select id="mode" onchange="toggleCustom();updateParams()">
+          <option value="default">Default (Dynamic SL · 1:2 R:R)</option>
+          <option value="custom">Custom (Fixed SL / Target)</option>
+        </select>
+      </div>
+      <div id="custom-fields" class="hidden">
+        <div class="form-group">
+          <label>Stop Loss (pts)</label>
+          <input type="number" id="sl" value="10" oninput="updateParams()">
+        </div>
+        <div class="form-group">
+          <label>Target (pts)</label>
+          <input type="number" id="target" value="20" oninput="updateParams()">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Lots</label>
+        <input type="number" id="lots" value="1" min="1" max="20" oninput="updateParams()">
+      </div>
+
+      <div class="btn-row" style="margin-bottom:16px">
+        <button class="btn btn-success" onclick="startBot()">▶ Start Bot</button>
+        <button class="btn btn-danger" onclick="stopBot()">■ Stop Bot</button>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-ghost" onclick="reconnectBroker()">↺ Reconnect Broker</button>
+        <button class="btn btn-ghost" onclick="logout()">Logout</button>
+      </div>
+      <div class="msg" id="bot-msg"></div>
+
+      <div class="divider">
+        <hr><span>LIVE LOGS</span>
+        <hr>
+      </div>
+      <div id="logs-box"></div>
+    </div>
+  </div>
+
+  <script>
+    let sessionToken = localStorage.getItem('session_token');
+    let storedUser = localStorage.getItem('username');
+    let brokerConnected = localStorage.getItem('broker_connected') === 'true';
+
+    window.onload = () => {
+      if (sessionToken) {
+        if (brokerConnected) showStep(3);
+        else showStep(2);
+      }
+    };
+
+    // ── Step display ────────────────────────────────────────────
+    function showStep(n) {
+      document.getElementById('auth-card').classList.toggle('hidden', n !== 1);
+      document.getElementById('broker-card').classList.toggle('hidden', n !== 2);
+      document.getElementById('bot-card').classList.toggle('hidden', n !== 3);
+      [1, 2, 3].forEach(i => {
+        const el = document.getElementById(`s${i}`);
+        el.className = 'step' + (i < n ? ' done' : (i === n ? ' active' : ''));
+      });
+    }
+
+    // ── Message helper ──────────────────────────────────────────
+    function showMsg(id, text, isError) {
+      const el = document.getElementById(id);
+      el.textContent = text;
+      el.className = 'msg ' + (isError ? 'error' : 'success');
+      el.style.display = 'block';
+      if (!isError && id !== 'auth-msg') setTimeout(() => el.style.display = 'none', 5000);
+    }
+
+    function toggleAuthView(showLogin) {
+      document.getElementById('login-view').classList.toggle('hidden', !showLogin);
+      document.getElementById('register-view').classList.toggle('hidden', showLogin);
+      document.getElementById('auth-msg').style.display = 'none';
+    }
+
+    // ── Auth ────────────────────────────────────────────────────
+    async function handleLogin() {
+      const u = document.getElementById('login-userid').value.trim();
+      const p = document.getElementById('login-password').value;
+      if (!u || !p) return showMsg('auth-msg', 'Enter user ID and password.', true);
+      try {
+        const res = await fetch('/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: u, password: p })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+          sessionToken = data.session_token;
+          localStorage.setItem('session_token', sessionToken);
+          localStorage.setItem('username', u);
+          showStep(2);
+        } else {
+          showMsg('auth-msg', data.error || 'Login Failed', true);
+        }
+      } catch (e) { showMsg('auth-msg', 'Server error: ' + e.message, true); }
+    }
+
+    async function handleRegister() {
+      const name = document.getElementById('reg-name').value.trim();
+      const age = parseInt(document.getElementById('reg-age').value);
+      const occ = document.getElementById('reg-occ').value.trim();
+      const phone = document.getElementById('reg-phone').value.trim();
+      const p = document.getElementById('reg-password').value;
+      if (!name || !age || !occ || !phone || !p) return showMsg('auth-msg', 'Fill all fields.', true);
+
+      try {
+        const res = await fetch('/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name, age: age, occupation: occ, phone: phone, password: p })
+        });
+        const data = await res.json();
+        if (data.status === 'registered') {
+          showMsg('auth-msg', `Registered! Your User ID is ${data.user_id}. Please login.`, false);
+          document.getElementById('login-userid').value = data.user_id;
+          setTimeout(() => toggleAuthView(true), 3000);
+        } else {
+          showMsg('auth-msg', data.error || 'Registration Failed', true);
+        }
+      } catch (e) { showMsg('auth-msg', 'Server error: ' + e.message, true); }
+    }
+
+    // ── Connect Broker ──────────────────────────────────────────
+    async function connectBroker() {
+      const clientId = document.getElementById('client-id').value.trim();
+      const pin = document.getElementById('trading-pin').value.trim();
+      const totpSecret = document.getElementById('totp-secret').value.trim();
+      if (!clientId || !pin || !totpSecret)
+        return showMsg('broker-msg', 'All three broker fields are required.', true);
+      showMsg('broker-msg', 'Connecting to Tradejini…', false);
+      try {
+        const res = await fetch('/connect-broker', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_token: sessionToken,
+            client_id: clientId,
+            password: pin,
+            totp_secret: totpSecret
+          })
+        });
+        const data = await res.json();
+        if (data.status) {
+          localStorage.setItem('broker_connected', 'true');
+          brokerConnected = true;
+          showStep(3);
+          // Clear sensitive fields from DOM
+          document.getElementById('trading-pin').value = '';
+          document.getElementById('totp-secret').value = '';
+        } else {
+          showMsg('broker-msg', data.error || 'Broker connection failed.', true);
+        }
+      } catch (e) { showMsg('broker-msg', 'Server error: ' + e.message, true); }
+    }
+
+    function reconnectBroker() {
+      localStorage.setItem('broker_connected', 'false');
+      brokerConnected = false;
+      showStep(2);
+    }
+
+    // ── Param display ───────────────────────────────────────────
+    function toggleCustom() {
+      const c = document.getElementById('mode').value === 'custom';
+      document.getElementById('custom-fields').classList.toggle('hidden', !c);
+    }
+
+    function updateParams() {
+      const mode = document.getElementById('mode').value;
+      const sl = document.getElementById('sl').value;
+      const tgt = document.getElementById('target').value;
+      document.getElementById('r-index').textContent = document.getElementById('index').value;
+      document.getElementById('r-lots').textContent = document.getElementById('lots').value;
+      document.getElementById('r-sl').textContent = mode === 'custom' ? sl + ' pts' : 'Dynamic';
+      document.getElementById('r-target').textContent = mode === 'custom' ? tgt + ' pts' : 'Dynamic';
+    }
+
+    // ── Bot control ─────────────────────────────────────────────
+    async function startBot() {
+      const index = document.getElementById('index').value;
+      const mode = document.getElementById('mode').value;
+      const lots = parseInt(document.getElementById('lots').value);
+      const sl = parseInt(document.getElementById('sl').value);
+      const target = parseInt(document.getElementById('target').value);
+      const msg = `Deploy bot?\n\nIndex: ${index}\nLots: ${lots}\nMode: ${mode === 'custom' ? `Custom (SL:${sl} / Target:${target})` : 'Default'}`;
+      if (!confirm(msg)) return;
+      try {
+        const res = await fetch(`/start-bot`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_token: sessionToken, mode, sl, target, index, lots })
+        });
+        const data = await res.json();
+        showMsg('bot-msg', data.status || data.error, !data.status);
+      } catch (e) { showMsg('bot-msg', 'Failed to start bot', true); }
+    }
+
+    async function stopBot() {
+      try {
+        const res = await fetch(`/stop-bot`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_token: sessionToken })
+        });
+        const data = await res.json();
+        showMsg('bot-msg', data.status || data.error, !data.status);
+      } catch (e) { showMsg('bot-msg', 'Failed to stop bot', true); }
+    }
+
+    function logout() {
+      localStorage.clear();
+      sessionToken = null;
+      brokerConnected = false;
+      showStep(1);
+      toggleAuthView(true);
+    }
+
+    // ── Live logs ───────────────────────────────────────────────
+    let lastLogCount = 0;
+    async function fetchLogs() {
+      if (!sessionToken || !brokerConnected) return;
+      try {
+        const res = await fetch(`/logs?session_token=${sessionToken}`);
+        const data = await res.json();
+        if (!data.logs) return;
+        const box = document.getElementById('logs-box');
+        if (data.logs.length !== lastLogCount) {
+          lastLogCount = data.logs.length;
+          box.innerHTML = data.logs.map(l => {
+            const isErr = l.toLowerCase().includes('error') || l.includes('🛑');
+            return `<div class="log-line${isErr ? ' err' : ''}">▶ ${l}</div>`;
+          }).join('');
+          box.scrollTop = box.scrollHeight;
+        }
+      } catch (e) { }
+    }
+    setInterval(fetchLogs, 2000);
+  </script>
+</body>
+
+</html>
