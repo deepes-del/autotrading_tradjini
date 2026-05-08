@@ -388,10 +388,45 @@ def admin_user_errors(
         return {"error": str(e)}
 
 
-# ── Admin: Trade history per user ────────────────────────────
+# ── Admin: Strategy Trades ───────────────────────────────────
 
-@app.get("/admin/user-trades")
-def admin_user_trades(
+@app.get("/admin/strategy-trades")
+def admin_strategy_trades(
+    admin_token: str,
+    user_id: str,
+    limit: int = 200,
+    offset: int = 0,
+):
+    """
+    Return all strategy signals for a specific user.
+    """
+    if admin_token not in admin_sessions:
+        return {"error": "Unauthorized"}
+
+    try:
+        query = (
+            supabase.table("strategy_trades")
+            .select("id, symbol, side, qty, entry_price, sl, target, created_at")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+        )
+        res = query.range(offset, offset + limit - 1).execute()
+        return {
+            "user_id": user_id,
+            "total":   len(res.data),
+            "offset":  offset,
+            "limit":   limit,
+            "trades":  res.data,
+        }
+    except Exception as e:
+        logging.error(f"[ADMIN] strategy-trades fetch failed for {user_id}: {e}")
+        return {"error": str(e)}
+
+
+# ── Admin: Broker Trades (Real Executions) ───────────────────
+
+@app.get("/admin/broker-trades")
+def admin_broker_trades(
     admin_token: str,
     user_id: str,
     status: str | None = None,   # optional filter: OPEN / CLOSED
@@ -399,18 +434,17 @@ def admin_user_trades(
     offset: int = 0,
 ):
     """
-    Return all trades for a specific user (both OPEN and CLOSED).
-    Optional ?status=OPEN or ?status=CLOSED filter.
+    Return all real executed broker trades for a specific user.
     """
     if admin_token not in admin_sessions:
         return {"error": "Unauthorized"}
 
     try:
         query = (
-            supabase.table("trades")
+            supabase.table("broker_trades")
             .select(
-                "id, symbol, side, qty, entry_price, exit_price, "
-                "sl, target, status, created_at, closed_at"
+                "id, strategy_trade_id, symbol, side, qty, executed_price, exit_price, "
+                "sl, target, status, broker_order_id, created_at, closed_at"
             )
             .eq("user_id", user_id)
             .order("created_at", desc=True)
@@ -428,5 +462,5 @@ def admin_user_trades(
             "trades":  res.data,
         }
     except Exception as e:
-        logging.error(f"[ADMIN] user-trades fetch failed for {user_id}: {e}")
+        logging.error(f"[ADMIN] broker-trades fetch failed for {user_id}: {e}")
         return {"error": str(e)}

@@ -560,3 +560,21 @@ def is_sl_order_active(broker_ctx: dict, order_id: str) -> bool:
         logging.error(f"[SL CHECK] Exception: {exc}")
 
     return False
+
+
+def get_order_status(broker_ctx: dict, order_id: str) -> dict | None:
+    """
+    Fetch the full order details for a given order_id.
+    """
+    try:
+        res = _get("/api/oms/orders", broker_ctx)
+        orders = _extract_rows(res)
+
+        for order in orders:
+            current_order_id = order.get("orderId") or order.get("orderid")
+            if str(current_order_id) == str(order_id):
+                return order
+    except Exception as exc:
+        logging.error(f"[ORDER FETCH] Exception: {exc}")
+
+    return None

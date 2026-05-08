@@ -149,13 +149,17 @@
       </div>
       <div class="tabs">
         <button class="tab-btn active" id="tab-errors-btn" onclick="switchTab('errors')">📛 Errors</button>
-        <button class="tab-btn" id="tab-trades-btn" onclick="switchTab('trades')">💰 Trades</button>
+        <button class="tab-btn" id="tab-strategy-btn" onclick="switchTab('strategy')">📈 Strategy Signals</button>
+        <button class="tab-btn" id="tab-broker-btn" onclick="switchTab('broker')">💰 Broker Trades (Real)</button>
       </div>
       <div id="tab-errors" class="tab-content active">
         <div id="errors-body" class="loading">Loading…</div>
       </div>
-      <div id="tab-trades" class="tab-content">
-        <div id="trades-body" class="loading">Loading…</div>
+      <div id="tab-strategy" class="tab-content">
+        <div id="strategy-body" class="loading">Loading…</div>
+      </div>
+      <div id="tab-broker" class="tab-content">
+        <div id="broker-body" class="loading">Loading…</div>
       </div>
     </div>
   </div>
@@ -307,12 +311,17 @@ function closeDetail() {
 function switchTab(tab) {
   activeTab = tab;
   document.getElementById('tab-errors-btn').classList.toggle('active', tab === 'errors');
-  document.getElementById('tab-trades-btn').classList.toggle('active', tab === 'trades');
+  document.getElementById('tab-strategy-btn').classList.toggle('active', tab === 'strategy');
+  document.getElementById('tab-broker-btn').classList.toggle('active', tab === 'broker');
+  
   document.getElementById('tab-errors').classList.toggle('active', tab === 'errors');
-  document.getElementById('tab-trades').classList.toggle('active', tab === 'trades');
+  document.getElementById('tab-strategy').classList.toggle('active', tab === 'strategy');
+  document.getElementById('tab-broker').classList.toggle('active', tab === 'broker');
+  
   if (!activeDetailUser) return;
   if (tab === 'errors') loadErrors(activeDetailUser);
-  else                  loadTrades(activeDetailUser);
+  else if (tab === 'strategy') loadStrategyTrades(activeDetailUser);
+  else if (tab === 'broker') loadBrokerTrades(activeDetailUser);
 }
 
 // ── Errors tab ────────────────────────────────────────────────
@@ -356,21 +365,57 @@ function toggleRaw(id) {
   el.previousElementSibling.textContent = show ? 'show raw ▾' : 'hide raw ▴';
 }
 
-// ── Trades tab ────────────────────────────────────────────────
-async function loadTrades(uid) {
-  const body = document.getElementById('trades-body');
-  body.innerHTML = '<div class="loading">Fetching trades…</div>';
+// ── Strategy Trades tab ──────────────────────────────────────
+async function loadStrategyTrades(uid) {
+  const body = document.getElementById('strategy-body');
+  body.innerHTML = '<div class="loading">Fetching strategy signals…</div>';
   try {
-    const res  = await fetch(`/admin/user-trades?admin_token=${adminToken}&user_id=${uid}&limit=200`);
+    const res  = await fetch(`/admin/strategy-trades?admin_token=${adminToken}&user_id=${uid}&limit=200`);
     const data = await res.json();
     if (data.error) { body.innerHTML = `<div class="empty-state"><span>⚠️</span>${data.error}</div>`; return; }
     if (!data.trades || !data.trades.length) {
-      body.innerHTML = '<div class="empty-state"><span>📭</span>No trades recorded yet</div>'; return;
+      body.innerHTML = '<div class="empty-state"><span>📭</span>No strategy signals recorded yet</div>'; return;
     }
     const rows = data.trades.map(t => {
-      const pnl     = t.exit_price ? ((t.exit_price - t.entry_price) * t.qty).toFixed(2) : '—';
+      const ts = new Date(t.created_at).toLocaleString('en-IN', {timeZone:'Asia/Kolkata', hour12:false});
+      return `<tr>
+        <td style="font-size:.78rem;color:#94a3b8">${ts}</td>
+        <td style="font-weight:600">${t.symbol}</td>
+        <td>${t.side}</td>
+        <td>${t.qty}</td>
+        <td>${t.entry_price}</td>
+        <td>${t.sl}</td>
+        <td>${t.target}</td>
+      </tr>`;
+    }).join('');
+    body.innerHTML = `
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr>
+            <th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th>
+            <th>Signal Entry</th><th>SL</th><th>Target</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  } catch { body.innerHTML = '<div class="empty-state"><span>🔴</span>Failed to load strategy signals</div>'; }
+}
+
+// ── Broker Trades tab ────────────────────────────────────────
+async function loadBrokerTrades(uid) {
+  const body = document.getElementById('broker-body');
+  body.innerHTML = '<div class="loading">Fetching real broker trades…</div>';
+  try {
+    const res  = await fetch(`/admin/broker-trades?admin_token=${adminToken}&user_id=${uid}&limit=200`);
+    const data = await res.json();
+    if (data.error) { body.innerHTML = `<div class="empty-state"><span>⚠️</span>${data.error}</div>`; return; }
+    if (!data.trades || !data.trades.length) {
+      body.innerHTML = '<div class="empty-state"><span>📭</span>No real broker trades executed yet</div>'; return;
+    }
+    const rows = data.trades.map(t => {
+      const pnl     = t.exit_price ? ((t.exit_price - t.executed_price) * t.qty).toFixed(2) : '—';
       const pnlCls  = pnl === '—' ? '' : (parseFloat(pnl) >= 0 ? 'pnl-positive' : 'pnl-negative');
-      const pnlStr  = pnl === '—' ? '—' : `${pnl >= 0 ? '+' : ''}₹${pnl}`;
+      const pnlStr  = pnl === '—' ? '—' : `${parseFloat(pnl) >= 0 ? '+' : ''}₹${pnl}`;
       const ts      = new Date(t.created_at).toLocaleString('en-IN', {timeZone:'Asia/Kolkata', hour12:false});
       const closedTs= t.closed_at ? new Date(t.closed_at).toLocaleTimeString('en-IN', {timeZone:'Asia/Kolkata', hour12:false}) : '—';
       return `<tr>
@@ -378,7 +423,7 @@ async function loadTrades(uid) {
         <td style="font-weight:600">${t.symbol}</td>
         <td>${t.side}</td>
         <td>${t.qty}</td>
-        <td>${t.entry_price}</td>
+        <td>${t.executed_price}</td>
         <td>${t.exit_price ?? '—'}</td>
         <td>${t.sl}</td>
         <td>${t.target}</td>
@@ -392,13 +437,13 @@ async function loadTrades(uid) {
         <table>
           <thead><tr>
             <th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th>
-            <th>Entry</th><th>Exit</th><th>SL</th><th>Target</th>
+            <th>Executed Price</th><th>Exit</th><th>SL</th><th>Target</th>
             <th>P&amp;L</th><th>Status</th><th>Closed</th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>`;
-  } catch { body.innerHTML = '<div class="empty-state"><span>🔴</span>Failed to load trades</div>'; }
+  } catch { body.innerHTML = '<div class="empty-state"><span>🔴</span>Failed to load broker trades</div>'; }
 }
 
 // ── Toast ─────────────────────────────────────────────────────

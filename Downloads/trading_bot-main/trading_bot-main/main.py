@@ -52,7 +52,7 @@ def add_log(user_id: str, message: str) -> None:
 
 # ── Trade persistence helpers ────────────────────────────────
 
-def store_trade(
+def store_strategy_trade(
     user_id: str,
     symbol: str,
     qty: int,
@@ -60,53 +60,88 @@ def store_trade(
     sl: float,
     target: float,
     side: str = "BUY",
-) -> None:
+) -> str | None:
     """
-    Insert a confirmed (broker-acknowledged) trade into Supabase.
-    Called ONLY after place_buy_order() returns success=True.
+    Insert a strategy signal into Supabase.
+    Returns the generated strategy_trade_id or None on failure.
     """
     try:
         from supabase_client import supabase
-        supabase.table("trades").insert({
-            "user_id":         user_id,
-            "symbol":          symbol,
-            "side":            side,
-            "qty":             qty,
-            "entry_price":     round(float(entry_price), 2),
-            "sl":              round(float(sl), 2),
-            "target":          round(float(target), 2),
-            "status":          "OPEN",
+        res = supabase.table("strategy_trades").insert({
+            "user_id":     user_id,
+            "symbol":      symbol,
+            "side":        side,
+            "qty":         qty,
+            "entry_price": round(float(entry_price), 2),
+            "sl":          round(float(sl), 2),
+            "target":      round(float(target), 2),
         }).execute()
-        logging.info(f"[TRADE STORED] user={user_id} sym={symbol}")
+        logging.info(f"[STRATEGY STORED] user={user_id} sym={symbol}")
+        if res.data and len(res.data) > 0:
+            return res.data[0]["id"]
     except Exception as exc:
-        logging.error(f"[TRADE STORE FAIL] user={user_id}: {exc}")
-        log_error(user_id, "TRADE_STORE_FAILED", str(exc), severity="ERROR")
+        logging.error(f"[STRATEGY STORE FAIL] user={user_id}: {exc}")
+        log_error(user_id, "STRATEGY_STORE_FAILED", str(exc), severity="ERROR")
+    return None
 
 
-def close_trade(
+def store_broker_trade(
+    user_id: str,
+    strategy_trade_id: str | None,
+    symbol: str,
+    qty: int,
+    executed_price: float,
+    sl: float,
+    target: float,
+    broker_order_id: str,
+    side: str = "BUY",
+) -> None:
+    """
+    Insert a confirmed (broker-acknowledged and executed) trade into Supabase.
+    Called ONLY after place_buy_order() returns success AND order status is COMPLETE.
+    """
+    try:
+        from supabase_client import supabase
+        supabase.table("broker_trades").insert({
+            "user_id":           user_id,
+            "strategy_trade_id": strategy_trade_id,
+            "symbol":            symbol,
+            "side":              side,
+            "qty":               qty,
+            "executed_price":    round(float(executed_price), 2),
+            "sl":                round(float(sl), 2),
+            "target":            round(float(target), 2),
+            "status":            "OPEN",
+            "broker_order_id":   broker_order_id,
+        }).execute()
+        logging.info(f"[BROKER TRADE STORED] user={user_id} sym={symbol} order={broker_order_id}")
+    except Exception as exc:
+        logging.error(f"[BROKER TRADE STORE FAIL] user={user_id}: {exc}")
+        log_error(user_id, "BROKER_TRADE_STORE_FAILED", str(exc), severity="ERROR")
+
+
+def close_broker_trade(
     user_id: str,
     exit_price: float,
     reason: str = "CLOSED",
 ) -> None:
     """
     Mark a trade CLOSED in Supabase with the exit price and timestamp.
-    Called on target hit, SL hit, or EOD square-off.
-    `reason` is logged but not stored (status is always CLOSED).
     """
     try:
         from supabase_client import supabase
-        supabase.table("trades").update({
+        supabase.table("broker_trades").update({
             "exit_price": round(float(exit_price), 2),
             "status":     "CLOSED",
             "closed_at":  datetime.datetime.utcnow().isoformat(),
         }).eq("user_id", user_id).eq("status", "OPEN").execute()
         logging.info(
-            f"[TRADE CLOSED] user={user_id} "
+            f"[BROKER TRADE CLOSED] user={user_id} "
             f"exit={exit_price} reason={reason}"
         )
     except Exception as exc:
-        logging.error(f"[TRADE CLOSE FAIL] user={user_id}: {exc}")
-        log_error(user_id, "TRADE_CLOSE_FAILED", str(exc), severity="ERROR")
+        logging.error(f"[BROKER TRADE CLOSE FAIL] user={user_id}: {exc}")
+        log_error(user_id, "BROKER_TRADE_CLOSE_FAILED", str(exc), severity="ERROR")
 
 
 # ── Public API ───────────────────────────────────────────────
@@ -281,7 +316,7 @@ def _run_bot_logic(user_config: dict) -> None:
                         active_trade["opt_sym"], active_trade["opt_tok"]
                     )
                     eod_exit_price = float(current_ltp) if current_ltp else active_trade["entry_price"]
-                    close_trade(
+                    close_broker_trade(
                         user_id,
                         eod_exit_price,
                         reason="EOD_SQUAREOFF",
@@ -378,7 +413,7 @@ def _run_bot_logic(user_config: dict) -> None:
                     )
                     if tgt_res.get("success"):
                         add_log(user_id, f"🎯 Target Hit! SELL confirmed at {current_opt_ltp} | Order: {tgt_res['order_id']}")
-                        close_trade(
+                        close_broker_trade(
                             user_id,
                             current_opt_ltp,
                             reason="TARGET_HIT",
@@ -401,7 +436,7 @@ def _run_bot_logic(user_config: dict) -> None:
                     )
                     if not sl_still_active:
                         add_log(user_id, f"🛑 Stoploss Hit at {current_opt_ltp}")
-                        close_trade(
+                        close_broker_trade(
                             user_id,
                             current_opt_ltp,
                             reason="SL_HIT",
@@ -454,54 +489,80 @@ def _run_bot_logic(user_config: dict) -> None:
                             sl_price     = round(entry_price - option_sl_points, 1)
                             target_price = round(entry_price + target_points, 1)
 
-                            # ── Place BUY and validate strictly ──────────────
+                            # ── 1. Store Strategy Signal ──────────────────
+                            strat_id = store_strategy_trade(
+                                user_id=user_id,
+                                symbol=opt_sym,
+                                qty=trade_qty,
+                                entry_price=entry_price,
+                                sl=sl_price,
+                                target=target_price,
+                            )
+
+                            # ── 2. Place BUY and validate strictly ──────────────
                             buy_res = order_manager.place_buy_order(
                                 broker_ctx, opt_tok, opt_sym, trade_qty
                             )
 
                             if buy_res.get("success"):
                                 buy_order_id = buy_res["order_id"]
-                                add_log(user_id, f"✅ BUY order placed at {entry_price:.2f} | Order ID: {buy_order_id}")
-                                add_log(user_id, f"💰 Trade Executed\nSymbol: {opt_sym}\nEntry : {entry_price}\nSL    : {sl_price}\nTarget: {target_price}")
 
-                                # ── Store trade in Supabase ───────────────────
-                                store_trade(
-                                    user_id=user_id,
-                                    symbol=opt_sym,
-                                    qty=trade_qty,
-                                    entry_price=entry_price,
-                                    sl=sl_price,
-                                    target=target_price,
-                                )
+                                # ── 3. Verify Order Status with Broker ──────────────
+                                order_details = order_manager.get_order_status(broker_ctx, buy_order_id)
+                                order_status = str(order_details.get("status", "")).lower() if order_details else "unknown"
 
-                                # ── Place SL order ────────────────────────────
-                                sl_res = order_manager.place_sl_order(
-                                    broker_ctx, opt_tok, opt_sym, trade_qty, sl_price
-                                )
-                                sl_order_id = sl_res.get("order_id") if sl_res.get("success") else "UNKNOWN"
-                                if not sl_res.get("success"):
-                                    add_log(user_id, f"⚠️ SL order failed: {sl_res.get('message')} — monitor manually")
-                                    logging.error(f"[SL FAIL] user={user_id} | msg={sl_res.get('message')}")
-                                    log_error(
-                                        user_id, "SL_ORDER_FAILED",
-                                        sl_res.get("message", "Unknown"),
-                                        raw=sl_res.get("raw"),
-                                        severity="WARNING",
+                                if order_status in ["complete", "completed", "executed"]:
+                                    executed_price = float(order_details.get("avgPrice") or order_details.get("price") or entry_price)
+                                    add_log(user_id, f"✅ BUY executed at {executed_price:.2f} | Order: {buy_order_id}")
+                                    add_log(user_id, f"💰 Real Trade Stored\nSymbol: {opt_sym}\nEntry: {executed_price}\nSL: {sl_price}\nTarget: {target_price}")
+
+                                    # ── 4. Store Real Broker Execution ──────────────
+                                    store_broker_trade(
+                                        user_id=user_id,
+                                        strategy_trade_id=strat_id,
+                                        symbol=opt_sym,
+                                        qty=trade_qty,
+                                        executed_price=executed_price,
+                                        sl=sl_price,
+                                        target=target_price,
+                                        broker_order_id=buy_order_id,
                                     )
 
-                                # Mark trade active ONLY after confirmed BUY
-                                active_trade = {
-                                    "opt_tok":      opt_tok,
-                                    "opt_sym":      opt_sym,
-                                    "trade_qty":    trade_qty,
-                                    "entry_price":  entry_price,
-                                    "sl_price":     sl_price,
-                                    "target_price": target_price,
-                                    "sl_order_id":  sl_order_id,
-                                    "buy_order_id": buy_order_id,  # needed for close_trade()
-                                }
-                                trades_today += 1
-                                clear_setup(user_id)
+                                    # ── 5. Place SL order ────────────────────────────
+                                    sl_res = order_manager.place_sl_order(
+                                        broker_ctx, opt_tok, opt_sym, trade_qty, sl_price
+                                    )
+                                    sl_order_id = sl_res.get("order_id") if sl_res.get("success") else "UNKNOWN"
+                                    if not sl_res.get("success"):
+                                        add_log(user_id, f"⚠️ SL order failed: {sl_res.get('message')} — monitor manually")
+                                        logging.error(f"[SL FAIL] user={user_id} | msg={sl_res.get('message')}")
+                                        log_error(
+                                            user_id, "SL_ORDER_FAILED",
+                                            sl_res.get("message", "Unknown"),
+                                            raw=sl_res.get("raw"),
+                                            severity="WARNING",
+                                        )
+
+                                    # Mark trade active ONLY after confirmed BUY execution
+                                    active_trade = {
+                                        "opt_tok":      opt_tok,
+                                        "opt_sym":      opt_sym,
+                                        "trade_qty":    trade_qty,
+                                        "entry_price":  executed_price,
+                                        "sl_price":     sl_price,
+                                        "target_price": target_price,
+                                        "sl_order_id":  sl_order_id,
+                                        "buy_order_id": buy_order_id,
+                                    }
+                                    trades_today += 1
+                                    clear_setup(user_id)
+                                else:
+                                    # Broker rejected order or it wasn't filled
+                                    msg = f"Order {buy_order_id} not executed. Status: {order_status}"
+                                    add_log(user_id, f"❌ {msg}")
+                                    logging.error(f"[BUY FAILED EXECUTION] user={user_id} | {msg}")
+                                    log_error(user_id, "ORDER_NOT_FILLED", msg, raw=order_details, severity="ERROR")
+                                    clear_setup(user_id)
                             else:
                                 # BUY failed — do NOT mark trade as active
                                 add_log(user_id, f"❌ BUY order failed: {buy_res.get('message')}")
