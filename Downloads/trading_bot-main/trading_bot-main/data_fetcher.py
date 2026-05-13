@@ -44,8 +44,12 @@ INDEX_YF_MAP = {
 _yf_cache = {}
 
 def _headers(broker_ctx: dict) -> dict:
+    """
+    Build per-user auth headers dynamically.
+    broker_ctx must contain 'api_key' and 'access_token'.
+    """
     return {
-        "Authorization": f"Bearer {config.API_KEY}:{broker_ctx['access_token']}",
+        "Authorization": f"Bearer {broker_ctx['api_key']}:{broker_ctx['access_token']}",
         "Content-Type": "application/json",
     }
 

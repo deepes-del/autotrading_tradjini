@@ -12,16 +12,18 @@ from urllib.parse import quote
 import pandas as pd
 import requests
 
-import config
-
 BASE_URL = "https://api.tradejini.com/v2"
 
 _cached_instrument_list = None
 
 
 def _headers(broker_ctx: dict, content_type: str | None = None) -> dict:
+    """
+    Build per-user auth headers dynamically.
+    broker_ctx must contain 'api_key' and 'access_token'.
+    """
     headers = {
-        "Authorization": f"Bearer {config.API_KEY}:{broker_ctx['access_token']}",
+        "Authorization": f"Bearer {broker_ctx['api_key']}:{broker_ctx['access_token']}",
         "Accept": "application/json",
     }
     if content_type:

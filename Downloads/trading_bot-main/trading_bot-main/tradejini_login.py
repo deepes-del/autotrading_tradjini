@@ -1,100 +1,206 @@
 """
 tradejini_login.py
 ------------------
-Tradejini (CubePlus) broker authentication.
+Hardened Tradejini (CubePlus) broker authentication — BYOK model.
 
-Verified Endpoint:
-    POST https://api.tradejini.com/api-gw/oauth/individual-token-v2
+Each user provides their own Tradejini API key.  The key is passed in
+as a parameter and NEVER read from a global config file.
+
+SAFETY RULES:
+  - client_id normalized to UPPERCASE + stripped.
+  - password (Trading PIN) whitespace trimmed.
+  - TOTP generated immediately before the HTTP request (never cached).
+  - ONE attempt only.  No retries.  Repeated wrong credentials block the account.
+  - Success = access_token present in response.
+  - Block phrases detected and returned with is_blocked=True.
+
+Endpoint:
+    POST https://api.tradejini.com/v2/api-gw/oauth/individual-token-v2
 
 Auth header (login only):
-    Authorization: Bearer <API_KEY>        ← API key alone, no access_token yet
+    Authorization: Bearer <USER_API_KEY>   ← user's own API key
 
 Payload (application/x-www-form-urlencoded):
-    password    – Trading PIN
-    twoFa       – Live TOTP (generated server-side)
-    twoFaTyp    – "totp"
-    NOTE: client_id is NOT included in payload — it is part of the API_KEY context.
-
-Returns: access_token string on success, None on failure.
+    userId   – Tradejini client ID  (UPPERCASE)
+    password – Trading PIN
+    twoFa    – Live TOTP (generated server-side immediately before call)
+    twoFaTyp – "totp"
 """
 
 import requests
 import pyotp
 import logging
-import config
 
-BASE_URL      = "https://api.tradejini.com/v2"
+BASE_URL       = "https://api.tradejini.com/v2"
 LOGIN_ENDPOINT = "/api-gw/oauth/individual-token-v2"
 
+_BLOCK_PHRASES = (
+    "blocked",
+    "incorrect attempts",
+    "account locked",
+    "too many attempts",
+    "maximum attempts",
+)
 
-def login_tradejini(client_id: str, password: str, totp_secret: str) -> str | None:
+
+def _is_block_error(message: str) -> bool:
+    msg_lower = (message or "").lower()
+    return any(phrase in msg_lower for phrase in _BLOCK_PHRASES)
+
+
+def _extract_error_msg(response: requests.Response) -> str:
+    try:
+        data = response.json()
+        return (
+            data.get("msg")
+            or data.get("message")
+            or data.get("error_description")
+            or data.get("errmsg")
+            or response.text
+        )
+    except Exception:
+        return response.text
+
+
+def _mask(value: str) -> str:
+    """Mask sensitive string for logging: show first 4 and last 4 chars only."""
+    if not value or len(value) < 9:
+        return "****"
+    return f"{value[:4]}{'*' * (len(value) - 8)}{value[-4:]}"
+
+
+def login_tradejini(
+    api_key: str,
+    client_id: str,
+    password: str,
+    totp_secret: str,
+) -> tuple[str | None, str | None, bool]:
     """
-    Authenticate a single user with Tradejini.
+    Authenticate a single user with Tradejini using their own API key.
 
     Parameters
     ----------
+    api_key     : User's own Tradejini developer API key
     client_id   : Tradejini client / user ID
     password    : Trading PIN
     totp_secret : Base32 TOTP secret from the user's authenticator app
 
     Returns
     -------
-    (str, str)  – (access_token, error_message) where one is None
+    (access_token, error_message, is_blocked)
+      - On success : (token,  None,  False)
+      - On block   : (None,   msg,   True)
+      - On failure : (None,   msg,   False)
     """
+
+    # ── 1. Normalize & sanitize ───────────────────────────────────────────────
+    api_key   = api_key.strip()
+    client_id = client_id.strip().upper()
+    password  = password.strip()
+
+    if not api_key:
+        return None, "API key is missing. Please enter your Tradejini API key.", False
+
+    url = BASE_URL + LOGIN_ENDPOINT
+    headers = {
+        # BYOK: each user's own API key in the auth header
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type":  "application/x-www-form-urlencoded",
+    }
+
+    logging.info(
+        f"[BROKER_LOGIN_ATTEMPT] client={client_id} | "
+        f"api_key={_mask(api_key)}"
+    )
+
+    # ── 2. ONE attempt only — no retries ─────────────────────────────────────
     try:
         totp = pyotp.TOTP(totp_secret).now()
-        print(f"[LOGIN] Attempting Tradejini login for client: {client_id}")
+        logging.info(f"[TOTP_GENERATED] client={client_id} | (value not logged)")
 
-        url = BASE_URL + LOGIN_ENDPOINT
-
-        # Login uses ONLY the API key — no access_token exists yet
-        headers = {
-            "Authorization": f"Bearer {config.API_KEY}",
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
-        # client_id is NOT sent in payload — Tradejini identifies user via API key context
         payload = {
-            "password": password,    # Trading PIN — not logged
-            "twoFa":    totp,        # TOTP — not logged
+            "userId":   client_id,
+            "password": password,   # Trading PIN — not logged
+            "twoFa":    totp,       # TOTP — fresh, not logged
             "twoFaTyp": "totp",
         }
 
         response = requests.post(url, headers=headers, data=payload, timeout=15)
 
-        print(f"[LOGIN] STATUS:   {response.status_code}")
-        # Avoid printing full response — may contain access_token
-        safe_body = response.text if response.status_code != 200 else "[RESPONSE HIDDEN — contains token]"
-        print(f"[LOGIN] RESPONSE: {safe_body}")
+        logging.info(
+            f"[BROKER_LOGIN_ATTEMPT] client={client_id} | "
+            f"http_status={response.status_code}"
+        )
 
-        if response.status_code == 200:
-            if not response.text:
-                logging.error("[LOGIN] Empty response body.")
-                return None, "Empty response from broker"
-            data  = response.json()
-            # Try flat key first, then nested under 'data'
+        # ── 3. Parse response ─────────────────────────────────────────────────
+        if response.ok:
+            try:
+                data = response.json()
+            except Exception:
+                logging.error(
+                    f"[BROKER_LOGIN_FAILED] client={client_id} | non-JSON body"
+                )
+                return None, "Broker returned a non-JSON response", False
+
+            # PRIMARY SUCCESS: access_token present
+            data_dict = data.get("data") if isinstance(data.get("data"), dict) else {}
             token = (
                 data.get("access_token")
-                or data.get("data", {}).get("access_token")
+                or data.get("accessToken")
+                or data.get("token")
+                or data_dict.get("access_token")
+                or data_dict.get("accessToken")
+                or data_dict.get("token")
             )
-            if token:
-                logging.info(f"[LOGIN] Broker login successful for client: {client_id}")
-                return token, None
-            else:
-                logging.error(f"[LOGIN] Token missing in response: {data}")
-                return None, f"Token missing: {data.get('message', 'Unknown error')}"
-        else:
-            try:
-                err_data = response.json()
-                err_msg = err_data.get("msg") or err_data.get("message") or err_data.get("errmsg") or response.text
-            except:
-                err_msg = response.text
-            
-            logging.error(
-                f"[LOGIN] Failed for {client_id} | "
-                f"Status: {response.status_code} | Body: {response.text}"
-            )
-            return None, f"Broker rejected login: {err_msg}"
 
-    except Exception as e:
-        logging.error(f"[LOGIN] Exception during Tradejini login: {e}")
-        return None, f"System error: {str(e)}"
+            if token:
+                logging.info(
+                    f"[BROKER_LOGIN_SUCCESS] client={client_id} | "
+                    f"token_type={data.get('token_type', 'Bearer')} | "
+                    f"expires_in={data.get('expires_in', 'unknown')}s"
+                )
+                return token, None, False
+
+            # No token — extract reason
+            raw_msg = (
+                data.get("msg")
+                or data.get("message")
+                or data.get("error_description")
+                or str(data)
+            )
+
+            if _is_block_error(raw_msg):
+                logging.critical(
+                    f"[LOGIN_BLOCKED] client={client_id} | reason={raw_msg}"
+                )
+                return None, f"Account temporarily blocked: {raw_msg}", True
+
+            logging.error(
+                f"[BROKER_LOGIN_FAILED] client={client_id} | "
+                f"no access_token | reason={raw_msg}"
+            )
+            return None, f"Broker returned no token: {raw_msg}", False
+
+        else:
+            err_msg = _extract_error_msg(response)
+
+            if _is_block_error(err_msg):
+                logging.critical(
+                    f"[LOGIN_BLOCKED] client={client_id} | "
+                    f"http={response.status_code} | reason={err_msg}"
+                )
+                return None, f"Account temporarily blocked: {err_msg}", True
+
+            logging.error(
+                f"[BROKER_LOGIN_FAILED] client={client_id} | "
+                f"http={response.status_code} | reason={err_msg}"
+            )
+            return None, f"Broker rejected login (HTTP {response.status_code}): {err_msg}", False
+
+    except requests.exceptions.Timeout:
+        logging.error(f"[BROKER_LOGIN_FAILED] client={client_id} | timeout")
+        return None, "Login request timed out. Please try again.", False
+
+    except Exception as exc:
+        logging.error(f"[BROKER_LOGIN_FAILED] client={client_id} | exception={exc}")
+        return None, f"System error during login: {str(exc)}", False

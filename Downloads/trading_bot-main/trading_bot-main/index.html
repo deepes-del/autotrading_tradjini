@@ -307,6 +307,32 @@
       color: #334155;
       font-size: .75rem
     }
+
+    /* Settings Card Styles */
+    .settings-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 15px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #1e293b;
+    }
+    .settings-row h3 {
+      font-size: 0.9rem;
+      color: #94a3b8;
+    }
+    .masked-val {
+      font-family: monospace;
+      color: #64748b;
+      font-size: 0.85rem;
+    }
+    .edit-hint {
+      font-size: 0.75rem;
+      color: #64748b;
+      margin-top: -10px;
+      margin-bottom: 15px;
+      display: block;
+    }
   </style>
 </head>
 
@@ -346,14 +372,6 @@
           <input type="text" id="reg-name" placeholder="Deepesh">
         </div>
         <div class="form-group">
-          <label>Age</label>
-          <input type="number" id="reg-age" placeholder="22">
-        </div>
-        <div class="form-group">
-          <label>Occupation</label>
-          <input type="text" id="reg-occ" placeholder="Student">
-        </div>
-        <div class="form-group">
           <label>Phone Number</label>
           <input type="text" id="reg-phone" placeholder="7337850344">
         </div>
@@ -361,6 +379,24 @@
           <label>Password</label>
           <input type="password" id="reg-password" placeholder="••••••••">
         </div>
+        
+        <div class="divider">
+          <hr><span>BROKER CONFIG</span><hr>
+        </div>
+        
+        <div class="form-group">
+          <label>Tradejini API Key</label>
+          <input type="text" id="reg-api-key" placeholder="Developer Portal API Key">
+        </div>
+        <div class="form-group">
+          <label>Client ID</label>
+          <input type="text" id="reg-client-id" placeholder="TJ12345">
+        </div>
+        <div class="form-group">
+          <label>TOTP Secret</label>
+          <input type="password" id="reg-totp-secret" placeholder="Base32 Secret">
+        </div>
+
         <div class="btn-row">
           <button class="btn btn-ghost" onclick="toggleAuthView(true)">Back to Login</button>
           <button class="btn btn-primary" onclick="handleRegister()">Register</button>
@@ -370,26 +406,65 @@
       <div class="msg" id="auth-msg"></div>
     </div>
 
-    <!-- STEP 2: Connect Broker -->
-    <div class="card hidden" id="broker-card">
-      <h2>Step 2 — Connect Tradejini Broker</h2>
-      <div class="form-group">
-        <label>Tradejini Client ID</label>
-        <input type="text" id="client-id" placeholder="e.g. TJ12345">
+    <!-- STEP 2: Broker Management -->
+    <div id="broker-step" class="hidden">
+      <div class="card" id="broker-connect-card">
+        <div class="status-row">
+          <h2 style="margin-bottom:0">Step 2 — Connect Broker</h2>
+          <button class="btn btn-ghost" id="edit-broker-btn" style="width:auto; padding: 5px 12px;" onclick="toggleBrokerEdit()">Edit Credentials</button>
+        </div>
+
+        <!-- 1. Display Mode (Persistent Details) -->
+        <div id="broker-details-view">
+          <div class="form-group">
+            <label>API Key</label>
+            <div class="masked-val" id="disp-api-key">••••••••••••</div>
+          </div>
+          <div class="form-group">
+            <label>Client ID</label>
+            <div class="masked-val" id="disp-client-id">••••••</div>
+          </div>
+          <div class="form-group">
+            <label>TOTP Status</label>
+            <div class="masked-val" id="disp-totp-status">Configured</div>
+          </div>
+          
+          <div class="divider"><hr><span>AUTHENTICATION</span><hr></div>
+          
+          <div class="form-group">
+            <label>Trading PIN</label>
+            <input type="password" id="trading-pin" placeholder="Enter 4–6 digit PIN">
+          </div>
+          
+          <div class="btn-row">
+            <button class="btn btn-ghost" onclick="logout()">Logout</button>
+            <button class="btn btn-primary" id="btn-connect" onclick="connectBroker()">Connect to Tradejini →</button>
+          </div>
+        </div>
+
+        <!-- 2. Edit Mode (Credential Setup) -->
+        <div id="broker-edit-view" class="hidden">
+          <p class="edit-hint" style="text-align: center; margin-bottom: 15px;">Leave fields blank to keep existing credentials.</p>
+          <div class="form-group">
+            <label>Tradejini API Key</label>
+            <input type="text" id="cfg-api-key" placeholder="Developer Portal API Key">
+          </div>
+          <div class="form-group">
+            <label>Client ID</label>
+            <input type="text" id="cfg-client-id" placeholder="e.g. TJ12345">
+          </div>
+          <div class="form-group">
+            <label>TOTP Secret (Base32)</label>
+            <input type="password" id="cfg-totp-secret" placeholder="From Authenticator App">
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-ghost" onclick="toggleBrokerEdit(false)">Cancel</button>
+            <button class="btn btn-primary" onclick="saveBrokerDetails()">Save & Use Credentials</button>
+          </div>
+        </div>
+
+        <div class="msg" id="broker-msg"></div>
       </div>
-      <div class="form-group">
-        <label>Trading PIN</label>
-        <input type="password" id="trading-pin" placeholder="4–6 digit PIN">
-      </div>
-      <div class="form-group">
-        <label>TOTP Secret (Base32)</label>
-        <input type="password" id="totp-secret" placeholder="From authenticator app">
-      </div>
-      <div class="btn-row">
-        <button class="btn btn-ghost" onclick="logout()">← Back to Login</button>
-        <button class="btn btn-primary" onclick="connectBroker()">Connect Broker →</button>
-      </div>
-      <div class="msg" id="broker-msg"></div>
     </div>
 
     <!-- STEP 3: Bot Controls -->
@@ -470,17 +545,23 @@
     let storedUser = localStorage.getItem('username');
     let brokerConnected = localStorage.getItem('broker_connected') === 'true';
 
-    window.onload = () => {
+    window.onload = async () => {
       if (sessionToken) {
-        if (brokerConnected) showStep(3);
-        else showStep(2);
+        const res = await fetch(`/bot/status?session_token=${sessionToken}`);
+        const data = await res.json();
+        if (data.status === 'connected') {
+          showStep(3);
+        } else {
+          showStep(2);
+          fetchBrokerDetails();
+        }
       }
     };
 
     // ── Step display ────────────────────────────────────────────
     function showStep(n) {
       document.getElementById('auth-card').classList.toggle('hidden', n !== 1);
-      document.getElementById('broker-card').classList.toggle('hidden', n !== 2);
+      document.getElementById('broker-step').classList.toggle('hidden', n !== 2);
       document.getElementById('bot-card').classList.toggle('hidden', n !== 3);
       [1, 2, 3].forEach(i => {
         const el = document.getElementById(`s${i}`);
@@ -520,6 +601,7 @@
           localStorage.setItem('session_token', sessionToken);
           localStorage.setItem('username', u);
           showStep(2);
+          fetchBrokerDetails();
         } else {
           showMsg('auth-msg', data.error || 'Login Failed', true);
         }
@@ -528,36 +610,134 @@
 
     async function handleRegister() {
       const name = document.getElementById('reg-name').value.trim();
-      const age = parseInt(document.getElementById('reg-age').value);
-      const occ = document.getElementById('reg-occ').value.trim();
       const phone = document.getElementById('reg-phone').value.trim();
-      const p = document.getElementById('reg-password').value;
-      if (!name || !age || !occ || !phone || !p) return showMsg('auth-msg', 'Fill all fields.', true);
+      const password = document.getElementById('reg-password').value;
+      const apiKey = document.getElementById('reg-api-key').value.trim();
+      const clientId = document.getElementById('reg-client-id').value.trim();
+      const totpSecret = document.getElementById('reg-totp-secret').value.trim();
+
+      if (!name || !phone || !password || !apiKey || !clientId || !totpSecret) {
+        return showMsg('auth-msg', 'All fields including broker credentials are required.', true);
+      }
+
+      showMsg('auth-msg', 'Registering account…', false);
 
       try {
+        // Single request: backend creates user AND saves broker_configs atomically
         const res = await fetch('/register', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: name, age: age, occupation: occ, phone: phone, password: p })
+          body: JSON.stringify({
+            name,
+            age: 0,
+            occupation: 'User',
+            phone,
+            password,
+            api_key: apiKey,
+            client_id: clientId,
+            totp_secret: totpSecret
+          })
         });
         const data = await res.json();
+
         if (data.status === 'registered') {
-          showMsg('auth-msg', `Registered! Your User ID is ${data.user_id}. Please login.`, false);
+          // Both user + broker_configs were saved successfully
+          showMsg('auth-msg', `✅ Registered! Your User ID is ${data.user_id}. Please login now.`, false);
           document.getElementById('login-userid').value = data.user_id;
           setTimeout(() => toggleAuthView(true), 3000);
         } else {
-          showMsg('auth-msg', data.error || 'Registration Failed', true);
+          showMsg('auth-msg', data.error || 'Registration failed. Please try again.', true);
         }
-      } catch (e) { showMsg('auth-msg', 'Server error: ' + e.message, true); }
+      } catch (e) {
+        showMsg('auth-msg', 'Server error: ' + e.message, true);
+      }
+    }
+
+    // ── Broker Details (Persistent State) ───────────────────────
+    async function fetchBrokerDetails() {
+      const msgEl = document.getElementById('broker-msg');
+      try {
+        // Show subtle loading
+        document.getElementById('disp-api-key').textContent = 'Loading...';
+        document.getElementById('disp-client-id').textContent = 'Loading...';
+
+        const res = await fetch(`/broker-config?session_token=${sessionToken}`);
+        const data = await res.json();
+        
+        if (data.configured) {
+          document.getElementById('disp-api-key').textContent = data.api_key;
+          document.getElementById('disp-client-id').textContent = data.client_id;
+          document.getElementById('disp-totp-status').textContent = '✅ Securely Configured';
+          
+          toggleBrokerEdit(false); 
+          document.getElementById('btn-connect').disabled = false;
+        } else {
+          document.getElementById('disp-api-key').textContent = 'Not Set';
+          document.getElementById('disp-client-id').textContent = 'Not Set';
+          toggleBrokerEdit(true); 
+          document.getElementById('btn-connect').disabled = true;
+        }
+      } catch (e) { 
+        console.error('Failed to fetch broker details', e); 
+      }
+    }
+
+    function toggleBrokerEdit(show = null) {
+      const editView = document.getElementById('broker-edit-view');
+      const detailsView = document.getElementById('broker-details-view');
+      const editBtn = document.getElementById('edit-broker-btn');
+      
+      const shouldShowEdit = (show !== null) ? show : editView.classList.contains('hidden');
+      
+      editView.classList.toggle('hidden', !shouldShowEdit);
+      detailsView.classList.toggle('hidden', shouldShowEdit);
+      if (editBtn) editBtn.textContent = shouldShowEdit ? 'Cancel Edit' : 'Edit Credentials';
+    }
+
+    async function saveBrokerDetails() {
+      const apiKey = document.getElementById('cfg-api-key').value.trim();
+      const clientId = document.getElementById('cfg-client-id').value.trim();
+      const totpSecret = document.getElementById('cfg-totp-secret').value.trim();
+
+      const isConfigured = document.getElementById('disp-api-key').textContent !== 'Not Set';
+      
+      if (!isConfigured && (!apiKey || !clientId || !totpSecret)) {
+        return showMsg('broker-msg', 'All configuration fields are required for initial setup.', true);
+      }
+      
+      if (isConfigured && !apiKey && !clientId && !totpSecret) {
+        return showMsg('broker-msg', 'Please enter at least one field to update.', true);
+      }
+
+      showMsg('broker-msg', 'Saving to database...', false);
+      try {
+        const res = await fetch('/api/broker/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_token: sessionToken,
+            api_key: apiKey,
+            client_id: clientId,
+            totp_secret: totpSecret
+          })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+          showMsg('broker-msg', 'Credentials permanently saved in Supabase.', false);
+          fetchBrokerDetails();
+        } else {
+          showMsg('broker-msg', data.error, true);
+        }
+      } catch (e) { 
+        showMsg('broker-msg', 'Save failed: ' + e.message, true); 
+      }
     }
 
     // ── Connect Broker ──────────────────────────────────────────
     async function connectBroker() {
-      const clientId = document.getElementById('client-id').value.trim();
       const pin = document.getElementById('trading-pin').value.trim();
-      const totpSecret = document.getElementById('totp-secret').value.trim();
-      if (!clientId || !pin || !totpSecret)
-        return showMsg('broker-msg', 'All three broker fields are required.', true);
+      if (!pin) return showMsg('broker-msg', 'Please enter your Trading PIN.', true);
+      
       showMsg('broker-msg', 'Connecting to Tradejini…', false);
       try {
         const res = await fetch('/connect-broker', {
@@ -565,19 +745,14 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             session_token: sessionToken,
-            client_id: clientId,
-            password: pin,
-            totp_secret: totpSecret
+            password: pin
           })
         });
         const data = await res.json();
         if (data.status) {
           localStorage.setItem('broker_connected', 'true');
-          brokerConnected = true;
           showStep(3);
-          // Clear sensitive fields from DOM
           document.getElementById('trading-pin').value = '';
-          document.getElementById('totp-secret').value = '';
         } else {
           showMsg('broker-msg', data.error || 'Broker connection failed.', true);
         }
@@ -586,8 +761,8 @@
 
     function reconnectBroker() {
       localStorage.setItem('broker_connected', 'false');
-      brokerConnected = false;
       showStep(2);
+      fetchBrokerDetails();
     }
 
     // ── Param display ───────────────────────────────────────────

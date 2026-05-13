@@ -16,7 +16,13 @@ import config
 import data_fetcher
 import strategy
 import order_manager
-from session_manager import get_session, set_active, get_setup, set_setup, clear_setup
+from session_manager import (
+    get_user_session,
+    has_session,
+    set_setup,
+    get_setup,
+    clear_setup
+)
 from error_logger import log_error
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -182,7 +188,6 @@ def _run_bot_wrapper(user_config: dict) -> None:
         user_id = user_config.get("user_id")
         with bot_lock:
             running_bots.pop(user_id, None)
-        set_active(user_id, False)
         try:
             from supabase_client import supabase
             supabase.table("users").update({"bot_running": False}).eq("user_id", user_id).execute()
@@ -205,16 +210,11 @@ def _run_bot_logic(user_config: dict) -> None:
 
     # ── Fetch broker session ──────────────────────────────────
     add_log(user_id, "Fetching broker session...")
-    session = get_session(user_id)
-    if not session or not session.get("access_token"):
-        add_log(user_id, "ERROR: No broker session found. Connect broker first.")
+    from session_manager import build_broker_ctx
+    broker_ctx = build_broker_ctx(user_id)
+    if not broker_ctx:
+        add_log(user_id, "ERROR: No active broker session found. Please reconnect broker.")
         return
-
-    access_token = session["access_token"]
-    broker_ctx = {
-        "access_token": access_token,
-        "client_id": session["client_id"],
-    }
 
     # ── Load instruments ──────────────────────────────────────
     inst_df = order_manager.get_instrument_list(broker_ctx)
