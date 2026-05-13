@@ -822,7 +822,10 @@
     // ── Live logs ───────────────────────────────────────────────
     let lastLogCount = 0;
     async function fetchLogs() {
-      if (!sessionToken || !brokerConnected) return;
+      // Only poll when we have a session AND the bot-card is visible
+      if (!sessionToken) return;
+      const botCard = document.getElementById('bot-card');
+      if (!botCard || botCard.classList.contains('hidden')) return;
       try {
         const res = await fetch(`/logs?session_token=${sessionToken}`);
         const data = await res.json();
