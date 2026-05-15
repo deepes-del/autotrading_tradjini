@@ -504,6 +504,8 @@ def _run_bot_logic(user_config: dict) -> None:
                         opt_tok, opt_sym, option_ltp = order_manager.select_atm_option(
                             broker_ctx, inst_df, index_ltp, user_index
                         )
+                        
+                        add_log(user_id, f"🔍 ATM Result: tok={opt_tok} sym={opt_sym} ltp={option_ltp}")
 
                         if opt_tok and option_ltp:
                             # ── 1. Store Strategy Signal ──────────────────
@@ -578,7 +580,13 @@ def _run_bot_logic(user_config: dict) -> None:
                                 )
                                 clear_setup(user_id)
                         else:
-                            add_log(user_id, "❌ Failed to fetch option data")
+                            reason = []
+                            if not opt_tok:
+                                reason.append("No ATM token found in instrument list")
+                            elif not option_ltp:
+                                reason.append(f"LTP fetch failed for token={opt_tok} sym={opt_sym}")
+                            add_log(user_id, f"❌ Failed to fetch option data — {'; '.join(reason) if reason else 'Unknown reason'}")
+                            add_log(user_id, "⚠️ Check: broker session valid? NFO instruments loaded? Market open for options?")
                             clear_setup(user_id)
 
         time.sleep(1)

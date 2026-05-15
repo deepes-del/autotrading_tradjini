@@ -271,13 +271,16 @@ def get_ltp(
                     if bars:
                         # Tradejini format: [time, open, high, low, close, volume, oi]
                         return float(bars[-1][4])
+                    else:
+                        logging.error(f"[LTP NFO] No bars in response for token={symbol_id} | raw={res}")
                 else:
-                    logging.error(f"[FETCH ERROR] Status: {response.status_code} | Text: {response.text}")
+                    logging.error(f"[FETCH ERROR] Status: {response.status_code} | Token: {symbol_id} | Text: {response.text}")
                     
             except Exception as e:
-                logging.error(f"[FETCH EXCEPTION] {e}")
+                logging.error(f"[FETCH EXCEPTION] token={symbol_id} | {e}")
                 if 'response' in locals():
                     logging.error(f"Raw Response: {response.text}")
                 time.sleep(1)
 
+        logging.error(f"[LTP NFO] All 3 attempts failed for token={symbol_id}")
         return None
