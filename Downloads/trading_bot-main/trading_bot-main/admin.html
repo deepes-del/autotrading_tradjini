@@ -131,14 +131,14 @@
           <tr>
             <th>User ID</th>
             <th>Name</th>
-            <th>Phone</th>
-            <th>Status</th>
+            <th>Bot Status</th>
+            <th>Strategy</th>
+            <th>Config</th>
             <th>Broker Status</th>
-            <th>Bot</th>
             <th>Actions</th>
           </tr>
         </thead>
-        <tbody id="users-table"><tr><td colspan="6" class="loading">Loading users…</td></tr></tbody>
+        <tbody id="users-table"><tr><td colspan="7" class="loading">Loading users…</td></tr></tbody>
       </table>
     </div>
 
@@ -242,17 +242,20 @@ async function fetchUsers() {
         : (u.status!=='blocked' ? `<button class="btn btn-primary" style="padding:5px 10px;font-size:.78rem" onclick="startBot('${u.user_id}')">▶ Start</button>` : '');
       const detailBtn   = `<button class="btn btn-ghost" style="padding:5px 10px;font-size:.78rem" onclick="openDetail('${u.user_id}','${u.name}')">🔍 View</button>`;
       const deleteBtn   = `<button class="btn btn-danger" style="padding:5px 10px;font-size:.78rem" onclick="deleteUser('${u.user_id}','${u.name}')">🗑</button>`;
+      const botStatusStr = u.bot_running ? '🟢 Running' : '⚫ Idle';
+      const stratName = u.active_strategy ? (u.active_strategy === 'strategy_one' ? 'Strat 1' : 'Strat 2') : '—';
+      const configStr = u.active_mode ? `${u.active_mode === 'custom' ? 'Custom' : 'Default'} (${u.active_sl}/${u.active_target})` : '—';
       const brokerStatus = u.broker_configured 
-        ? `<span class="badge badge-approved">Configured</span><br><small style="color:#64748b; font-size:10px">${new Date(u.broker_updated_at).toLocaleDateString()}</small>`
-        : `<span class="badge badge-blocked">Not Configured</span>`;
+        ? `<span class="badge badge-approved">Configured</span>`
+        : `<span class="badge badge-blocked">Not Set</span>`;
         
       return `<tr>
         <td class="mono">${u.user_id}</td>
-        <td>${u.name}</td>
-        <td>${u.phone}</td>
-        <td><span class="badge badge-${u.status}">${u.status.toUpperCase()}</span></td>
+        <td>${u.name}<br><small style="color:#64748b">${u.phone}</small></td>
+        <td><span class="badge badge-${u.status}">${u.status.toUpperCase()}</span><br>${botStatusStr}</td>
+        <td>${stratName}</td>
+        <td><small>${configStr}</small></td>
         <td>${brokerStatus}</td>
-        <td>${u.bot_running ? '🟢 Running' : '⚫ Idle'}</td>
         <td><div class="actions">${approveBtn}${blockBtn}${botBtn}${detailBtn}${deleteBtn}</div></td>
       </tr>`;
     }).join('');
@@ -423,28 +426,32 @@ async function loadBrokerTrades(uid) {
       const pnlCls  = pnl === '—' ? '' : (parseFloat(pnl) >= 0 ? 'pnl-positive' : 'pnl-negative');
       const pnlStr  = pnl === '—' ? '—' : `${parseFloat(pnl) >= 0 ? '+' : ''}₹${pnl}`;
       const ts      = new Date(t.created_at).toLocaleString('en-IN', {timeZone:'Asia/Kolkata', hour12:false});
-      const closedTs= t.closed_at ? new Date(t.closed_at).toLocaleTimeString('en-IN', {timeZone:'Asia/Kolkata', hour12:false}) : '—';
+      
       return `<tr>
         <td style="font-size:.78rem;color:#94a3b8">${ts}</td>
         <td style="font-weight:600">${t.symbol}</td>
-        <td>${t.side}</td>
         <td>${t.qty}</td>
-        <td>${t.executed_price}</td>
-        <td>${t.exit_price ?? '—'}</td>
-        <td>${t.sl}</td>
-        <td>${t.target}</td>
+        <td>₹${t.executed_price}</td>
+        <td>${t.sl ? '₹'+t.sl : '—'}</td>
+        <td>${t.target ? '₹'+t.target : '—'}</td>
+        <td>${t.exit_price ? '₹'+t.exit_price : '—'}</td>
         <td class="${pnlCls}">${pnlStr}</td>
         <td><span class="badge badge-${t.status.toLowerCase()}">${t.status}</span></td>
-        <td style="font-size:.78rem;color:#64748b">${closedTs}</td>
       </tr>`;
     }).join('');
     body.innerHTML = `
       <div style="overflow-x:auto">
         <table>
           <thead><tr>
-            <th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th>
-            <th>Executed Price</th><th>Exit</th><th>SL</th><th>Target</th>
-            <th>P&amp;L</th><th>Status</th><th>Closed</th>
+            <th>Time</th>
+            <th>Option Symbol</th>
+            <th>Qty</th>
+            <th>Entry Premium</th>
+            <th>SL Premium</th>
+            <th>Target Premium</th>
+            <th>Current/Exit Premium</th>
+            <th>Premium P&amp;L</th>
+            <th>Trade Status</th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>

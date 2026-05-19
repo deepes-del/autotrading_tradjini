@@ -172,6 +172,8 @@
       background: #263348
     }
 
+
+
     .btn-row {
       display: flex;
       gap: 10px
@@ -317,21 +319,109 @@
       padding-bottom: 10px;
       border-bottom: 1px solid #1e293b;
     }
+
     .settings-row h3 {
       font-size: 0.9rem;
       color: #94a3b8;
     }
+
     .masked-val {
       font-family: monospace;
       color: #64748b;
       font-size: 0.85rem;
     }
+
     .edit-hint {
       font-size: 0.75rem;
       color: #64748b;
       margin-top: -10px;
       margin-bottom: 15px;
       display: block;
+    }
+
+    /* Strategy Selector Overhaul */
+    .strategy-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 8px;
+    }
+
+    .strategy-card {
+      background: #0d0f14;
+      border: 2px solid #1e293b;
+      border-radius: 12px;
+      padding: 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      position: relative;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 80px;
+    }
+
+    .strategy-card:hover {
+      transform: translateY(-2px);
+      border-color: #334155;
+      background: #11161f;
+    }
+
+    .strategy-card.active {
+      background: rgba(59, 130, 246, 0.1);
+      border-color: #3b82f6;
+      box-shadow: 0 0 15px rgba(59, 130, 246, 0.2);
+    }
+
+    .strategy-card .strat-name {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: #94a3b8;
+      transition: color 0.3s;
+    }
+
+    .strategy-card.active .strat-name {
+      color: #fff;
+    }
+
+    .strategy-card .active-indicator {
+      font-size: 0.7rem;
+      font-weight: 700;
+      color: #3b82f6;
+      margin-top: 4px;
+      opacity: 0;
+      transform: translateY(5px);
+      transition: all 0.3s;
+    }
+
+    .strategy-card.active .active-indicator {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .strategy-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), transparent);
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    .strategy-card.active::before {
+      opacity: 1;
+    }
+
+    @media (max-width: 480px) {
+      .strategy-grid {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -340,6 +430,8 @@
   <div class="container">
     <h1>⚡ CubePlus Trading Bot</h1>
     <p class="subtitle">Tradejini · Multi-User · Real-Time</p>
+
+
 
     <div class="step-indicator">
       <div class="step active" id="s1"></div>
@@ -353,7 +445,7 @@
         <h2>Step 1 — Platform Login</h2>
         <div class="form-group">
           <label>User ID</label>
-          <input type="text" id="login-userid" placeholder="e.g. DEEP733712">
+          <input type="text" id="login-userid" placeholder="e.g. user id">
         </div>
         <div class="form-group">
           <label>Password</label>
@@ -369,32 +461,33 @@
         <h2>Step 1 — Register</h2>
         <div class="form-group">
           <label>Full Name</label>
-          <input type="text" id="reg-name" placeholder="Deepesh">
+          <input type="text" id="reg-name" placeholder="Full name">
         </div>
         <div class="form-group">
           <label>Phone Number</label>
-          <input type="text" id="reg-phone" placeholder="7337850344">
+          <input type="text" id="reg-phone" placeholder="Phone number">
         </div>
         <div class="form-group">
           <label>Password</label>
           <input type="password" id="reg-password" placeholder="••••••••">
         </div>
-        
+
         <div class="divider">
-          <hr><span>BROKER CONFIG</span><hr>
+          <hr><span>BROKER CONFIG</span>
+          <hr>
         </div>
-        
+
         <div class="form-group">
           <label>Tradejini API Key</label>
-          <input type="text" id="reg-api-key" placeholder="Developer Portal API Key">
+          <input type="text" id="reg-api-key" placeholder=" Portal API Key">
         </div>
         <div class="form-group">
           <label>Client ID</label>
-          <input type="text" id="reg-client-id" placeholder="TJ12345">
+          <input type="text" id="reg-client-id" placeholder="Broker client id">
         </div>
         <div class="form-group">
           <label>TOTP Secret</label>
-          <input type="password" id="reg-totp-secret" placeholder="Base32 Secret">
+          <input type="password" id="reg-totp-secret" placeholder="32 digit TOTP">
         </div>
 
         <div class="btn-row">
@@ -411,7 +504,8 @@
       <div class="card" id="broker-connect-card">
         <div class="status-row">
           <h2 style="margin-bottom:0">Step 2 — Connect Broker</h2>
-          <button class="btn btn-ghost" id="edit-broker-btn" style="width:auto; padding: 5px 12px;" onclick="toggleBrokerEdit()">Edit Credentials</button>
+          <button class="btn btn-ghost" id="edit-broker-btn" style="width:auto; padding: 5px 12px;"
+            onclick="toggleBrokerEdit()">Edit Credentials</button>
         </div>
 
         <!-- 1. Display Mode (Persistent Details) -->
@@ -428,14 +522,17 @@
             <label>TOTP Status</label>
             <div class="masked-val" id="disp-totp-status">Configured</div>
           </div>
-          
-          <div class="divider"><hr><span>AUTHENTICATION</span><hr></div>
-          
+
+          <div class="divider">
+            <hr><span>AUTHENTICATION</span>
+            <hr>
+          </div>
+
           <div class="form-group">
             <label>Trading PIN</label>
             <input type="password" id="trading-pin" placeholder="Enter 4–6 digit PIN">
           </div>
-          
+
           <div class="btn-row">
             <button class="btn btn-ghost" onclick="logout()">Logout</button>
             <button class="btn btn-primary" id="btn-connect" onclick="connectBroker()">Connect to Tradejini →</button>
@@ -444,7 +541,8 @@
 
         <!-- 2. Edit Mode (Credential Setup) -->
         <div id="broker-edit-view" class="hidden">
-          <p class="edit-hint" style="text-align: center; margin-bottom: 15px;">Leave fields blank to keep existing credentials.</p>
+          <p class="edit-hint" style="text-align: center; margin-bottom: 15px;">Leave fields blank to keep existing
+            credentials.</p>
           <div class="form-group">
             <label>Tradejini API Key</label>
             <input type="text" id="cfg-api-key" placeholder="Developer Portal API Key">
@@ -476,6 +574,10 @@
 
       <div class="param-grid" id="param-display">
         <div class="param-card">
+          <div class="pk">Strategy</div>
+          <div class="pv" id="r-strategy">Strategy One</div>
+        </div>
+        <div class="param-card">
           <div class="pk">Index</div>
           <div class="pv" id="r-index">NIFTY</div>
         </div>
@@ -484,42 +586,53 @@
           <div class="pv" id="r-lots">1</div>
         </div>
         <div class="param-card">
-          <div class="pk">Stop Loss</div>
-          <div class="pv" id="r-sl">Dynamic</div>
-        </div>
-        <div class="param-card">
-          <div class="pk">Target</div>
-          <div class="pv" id="r-target">Dynamic</div>
+          <div class="pk">SL / Target</div>
+          <div class="pv" id="r-sl-tgt">Dynamic</div>
         </div>
       </div>
 
       <div class="form-group">
         <label>Index</label>
-        <select id="index" onchange="updateParams()">
+        <select id="index" onchange="fetchBotConfig()">
           <option value="NIFTY">NIFTY</option>
           <option value="BANKNIFTY">BANKNIFTY</option>
         </select>
       </div>
+
+      <div class="form-group">
+        <label>Strategy Selection</label>
+        <div class="strategy-grid">
+          <div class="strategy-card active" id="card-strategy_one" onclick="selectStrategy('strategy_one')">
+            <span class="strat-name">Strategy One</span>
+            <span class="active-indicator">✅ ACTIVE</span>
+          </div>
+          <div class="strategy-card" id="card-strategy_two" onclick="selectStrategy('strategy_two')">
+            <span class="strat-name">Strategy Two</span>
+            <span class="active-indicator">✅ ACTIVE</span>
+          </div>
+        </div>
+        <input type="hidden" id="selected-strategy" value="strategy_one">
+      </div>
       <div class="form-group">
         <label>Mode</label>
-        <select id="mode" onchange="toggleCustom();updateParams()">
-          <option value="default">Default (Dynamic SL · 1:2 R:R)</option>
+        <select id="mode" onchange="toggleCustom();saveBotConfig()">
+          <option value="default" id="mode-default-opt">Default (Dynamic SL · 1:2 R:R)</option>
           <option value="custom">Custom (Fixed SL / Target)</option>
         </select>
       </div>
       <div id="custom-fields" class="hidden">
         <div class="form-group">
-          <label>Stop Loss (pts)</label>
-          <input type="number" id="sl" value="10" oninput="updateParams()">
+          <label id="sl-label">Stop Loss (pts)</label>
+          <input type="number" id="sl" value="10" oninput="updateParams()" onchange="saveBotConfig()">
         </div>
         <div class="form-group">
-          <label>Target (pts)</label>
-          <input type="number" id="target" value="20" oninput="updateParams()">
+          <label id="target-label">Target (pts)</label>
+          <input type="number" id="target" value="20" oninput="updateParams()" onchange="saveBotConfig()">
         </div>
       </div>
       <div class="form-group">
         <label>Lots</label>
-        <input type="number" id="lots" value="1" min="1" max="20" oninput="updateParams()">
+        <input type="number" id="lots" value="1" min="1" max="20" oninput="updateParams()" onchange="saveBotConfig()">
       </div>
 
       <div class="btn-row" style="margin-bottom:16px">
@@ -551,6 +664,7 @@
         const data = await res.json();
         if (data.status === 'connected') {
           showStep(3);
+          fetchBotConfig(); // Load saved config for current index
         } else {
           showStep(2);
           fetchBrokerDetails();
@@ -663,22 +777,22 @@
 
         const res = await fetch(`/broker-config?session_token=${sessionToken}`);
         const data = await res.json();
-        
+
         if (data.configured) {
           document.getElementById('disp-api-key').textContent = data.api_key;
           document.getElementById('disp-client-id').textContent = data.client_id;
           document.getElementById('disp-totp-status').textContent = '✅ Securely Configured';
-          
-          toggleBrokerEdit(false); 
+
+          toggleBrokerEdit(false);
           document.getElementById('btn-connect').disabled = false;
         } else {
           document.getElementById('disp-api-key').textContent = 'Not Set';
           document.getElementById('disp-client-id').textContent = 'Not Set';
-          toggleBrokerEdit(true); 
+          toggleBrokerEdit(true);
           document.getElementById('btn-connect').disabled = true;
         }
-      } catch (e) { 
-        console.error('Failed to fetch broker details', e); 
+      } catch (e) {
+        console.error('Failed to fetch broker details', e);
       }
     }
 
@@ -686,9 +800,9 @@
       const editView = document.getElementById('broker-edit-view');
       const detailsView = document.getElementById('broker-details-view');
       const editBtn = document.getElementById('edit-broker-btn');
-      
+
       const shouldShowEdit = (show !== null) ? show : editView.classList.contains('hidden');
-      
+
       editView.classList.toggle('hidden', !shouldShowEdit);
       detailsView.classList.toggle('hidden', shouldShowEdit);
       if (editBtn) editBtn.textContent = shouldShowEdit ? 'Cancel Edit' : 'Edit Credentials';
@@ -700,11 +814,11 @@
       const totpSecret = document.getElementById('cfg-totp-secret').value.trim();
 
       const isConfigured = document.getElementById('disp-api-key').textContent !== 'Not Set';
-      
+
       if (!isConfigured && (!apiKey || !clientId || !totpSecret)) {
         return showMsg('broker-msg', 'All configuration fields are required for initial setup.', true);
       }
-      
+
       if (isConfigured && !apiKey && !clientId && !totpSecret) {
         return showMsg('broker-msg', 'Please enter at least one field to update.', true);
       }
@@ -728,8 +842,8 @@
         } else {
           showMsg('broker-msg', data.error, true);
         }
-      } catch (e) { 
-        showMsg('broker-msg', 'Save failed: ' + e.message, true); 
+      } catch (e) {
+        showMsg('broker-msg', 'Save failed: ' + e.message, true);
       }
     }
 
@@ -737,7 +851,7 @@
     async function connectBroker() {
       const pin = document.getElementById('trading-pin').value.trim();
       if (!pin) return showMsg('broker-msg', 'Please enter your Trading PIN.', true);
-      
+
       showMsg('broker-msg', 'Connecting to Tradejini…', false);
       try {
         const res = await fetch('/connect-broker', {
@@ -765,35 +879,138 @@
       fetchBrokerDetails();
     }
 
-    // ── Param display ───────────────────────────────────────────
+    // ── Bot Configuration Persistence ────────────────────────
+    async function fetchBotConfig() {
+      const idx = document.getElementById('index').value;
+      try {
+        const res = await fetch(`/api/bot-config?session_token=${sessionToken}&index=${idx}`);
+        const data = await res.json();
+        if (data.status === 'success' && data.config) {
+          const cfg = data.config;
+          selectStrategy(cfg.strategy_name, false); // false to skip saving during fetch
+          document.getElementById('mode').value = cfg.mode;
+          document.getElementById('sl').value = cfg.sl_points;
+          document.getElementById('target').value = cfg.target_points;
+          document.getElementById('lots').value = cfg.lots;
+        } else {
+          // Defaults if no config found
+          selectStrategy('strategy_one', false);
+          document.getElementById('mode').value = 'default';
+          document.getElementById('sl').value = 25;
+          document.getElementById('target').value = 50;
+          document.getElementById('lots').value = 1;
+        }
+        updateStrategyUI();
+      } catch (e) {
+        console.error("Fetch config failed", e);
+      }
+    }
+
+    function selectStrategy(val, shouldSave = true) {
+      document.getElementById('selected-strategy').value = val;
+
+      // Update UI classes
+      document.querySelectorAll('.strategy-card').forEach(card => {
+        card.classList.remove('active');
+      });
+      document.getElementById(`card-${val}`).classList.add('active');
+
+      updateStrategyUI();
+      if (shouldSave) saveBotConfig();
+    }
+
+    async function saveBotConfig() {
+      const strategy = document.getElementById('selected-strategy').value;
+      const index = document.getElementById('index').value;
+      const mode = document.getElementById('mode').value;
+      const sl = parseInt(document.getElementById('sl').value);
+      const target = parseInt(document.getElementById('target').value);
+      const lots = parseInt(document.getElementById('lots').value);
+
+      updateParams();
+
+      try {
+        await fetch('/api/bot-config/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_token: sessionToken,
+            strategy,
+            index,
+            mode,
+            sl,
+            target,
+            lots
+          })
+        });
+      } catch (e) {
+        console.error("Save config failed", e);
+      }
+    }
+
+    function updateStrategyUI() {
+      const strategy = document.getElementById('selected-strategy').value;
+      const modeOpt = document.getElementById('mode-default-opt');
+      const slLabel = document.getElementById('sl-label');
+      const targetLabel = document.getElementById('target-label');
+
+      if (strategy === 'strategy_one') {
+        modeOpt.textContent = "Default (SL 20 pts · Target 40 pts)";
+      } else {
+        modeOpt.textContent = "Default (Dynamic SL · 1:2 R:R)";
+      }
+
+      slLabel.textContent = "Stop Loss (Premium Points)";
+      targetLabel.textContent = "Target (Premium Points)";
+
+      toggleCustom();
+      updateParams();
+    }
+
     function toggleCustom() {
       const c = document.getElementById('mode').value === 'custom';
       document.getElementById('custom-fields').classList.toggle('hidden', !c);
+      updateParams();
     }
 
     function updateParams() {
+      const strategy = document.getElementById('selected-strategy').value;
       const mode = document.getElementById('mode').value;
       const sl = document.getElementById('sl').value;
       const tgt = document.getElementById('target').value;
+
+      document.getElementById('r-strategy').textContent = strategy === 'strategy_one' ? 'Strategy One' : 'Strategy Two';
       document.getElementById('r-index').textContent = document.getElementById('index').value;
       document.getElementById('r-lots').textContent = document.getElementById('lots').value;
-      document.getElementById('r-sl').textContent = mode === 'custom' ? sl + ' pts' : 'Dynamic';
-      document.getElementById('r-target').textContent = mode === 'custom' ? tgt + ' pts' : 'Dynamic';
+
+      if (mode === 'default') {
+        if (strategy === 'strategy_one') {
+          document.getElementById('r-sl-tgt').textContent = '20 / 40 (Premium)';
+        } else {
+          document.getElementById('r-sl-tgt').textContent = 'Dynamic (Premium)';
+        }
+      } else {
+        document.getElementById('r-sl-tgt').textContent = `${sl} / ${tgt} (Premium)`;
+      }
     }
 
     // ── Bot control ─────────────────────────────────────────────
     async function startBot() {
+      const strategy = document.getElementById('selected-strategy').value;
       const index = document.getElementById('index').value;
       const mode = document.getElementById('mode').value;
       const lots = parseInt(document.getElementById('lots').value);
       const sl = parseInt(document.getElementById('sl').value);
       const target = parseInt(document.getElementById('target').value);
-      const msg = `Deploy bot?\n\nIndex: ${index}\nLots: ${lots}\nMode: ${mode === 'custom' ? `Custom (SL:${sl} / Target:${target})` : 'Default'}`;
+
+      const stratLabel = strategy === 'strategy_one' ? 'Strategy One' : 'Strategy Two';
+
+      const msg = `Deploy bot?\n\nStrategy: ${stratLabel}\nIndex: ${index}\nLots: ${lots}\nMode: ${mode === 'custom' ? `Custom (SL:${sl} / Target:${target} Premium Pts)` : 'Default'}`;
       if (!confirm(msg)) return;
       try {
         const res = await fetch(`/start-bot`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_token: sessionToken, mode, sl, target, index, lots })
+          body: JSON.stringify({ session_token: sessionToken, strategy, mode, sl, target, index, lots })
         });
         const data = await res.json();
         showMsg('bot-msg', data.status || data.error, !data.status);

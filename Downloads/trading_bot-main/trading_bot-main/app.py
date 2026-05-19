@@ -83,9 +83,10 @@ class BrokerConfigRequest(BaseModel):
 
 class BotConfig(BaseModel):
     session_token: str
+    strategy: str = "strategy_one"
     mode: str = "default"
-    sl: int = 10
-    target: int = 20
+    sl: int = 25
+    target: int = 50
     index: str = "NIFTY"
     lots: int = 1
 
@@ -397,6 +398,7 @@ def start_bot_api(config: BotConfig):
 
     user_config = {
         "user_id": user_id,
+        "strategy": config.strategy,
         "mode": config.mode,
         "sl": config.sl,
         "target": config.target,
@@ -433,6 +435,50 @@ def stop_bot_api(req: StopBotRequest):
         return {"status": "Stop signal sent"}
 
     return {"error": "No running bot found for this user"}
+
+
+# ──────────────────────────────────────────────────────────────
+# Bot Config Persistence
+# ──────────────────────────────────────────────────────────────
+
+@app.post("/api/bot-config/save")
+def save_bot_config(config: BotConfig):
+    user_id = validate_app_session(config.session_token)
+    if not user_id:
+        return {"error": "Invalid session"}
+    
+    try:
+        data = {
+            "user_id": user_id,
+            "index_name": config.index,
+            "strategy_name": config.strategy,
+            "mode": config.mode,
+            "sl_points": config.sl,
+            "target_points": config.target,
+            "lots": config.lots,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        # Upsert based on user_id and index_name
+        res = supabase.table("bot_configs").upsert(data, on_conflict="user_id,index_name").execute()
+        return {"status": "success", "message": "Bot configuration saved."}
+    except Exception as e:
+        logging.error(f"[BOT_CONFIG] Save error: {e}")
+        return {"error": str(e)}
+
+@app.get("/api/bot-config")
+def get_bot_config(session_token: str, index: str):
+    user_id = validate_app_session(session_token)
+    if not user_id:
+        return {"error": "Invalid session"}
+    
+    try:
+        res = supabase.table("bot_configs").select("*").eq("user_id", user_id).eq("index_name", index).execute()
+        if res.data:
+            return {"status": "success", "config": res.data[0]}
+        return {"status": "not_found"}
+    except Exception as e:
+        logging.error(f"[BOT_CONFIG] Fetch error: {e}")
+        return {"error": str(e)}
 
 
 # ──────────────────────────────────────────────────────────────
@@ -480,12 +526,25 @@ def admin_dashboard(admin_token: str):
         configs_res = supabase.table("broker_configs").select("user_id, updated_at").execute()
         configs_map = {c["user_id"]: c["updated_at"] for c in configs_res.data}
         
-        # 3. Combine
+        # 3. Fetch active bot info from main memory
+        from main import running_bots
+        
+        # 4. Combine
         results = []
         for u in users_res.data:
             u_id = u["user_id"]
             u["broker_configured"] = u_id in configs_map
             u["broker_updated_at"] = configs_map.get(u_id)
+            
+            # Add active bot info
+            if u_id in running_bots:
+                cfg = running_bots[u_id].get("config", {})
+                u["active_strategy"] = cfg.get("strategy")
+                u["active_mode"] = cfg.get("mode")
+                u["active_sl"] = cfg.get("sl")
+                u["active_target"] = cfg.get("target")
+                u["active_index"] = cfg.get("index")
+            
             results.append(u)
             
         return {"users": results}
@@ -515,9 +574,10 @@ def admin_start_bot(req: AdminActionReq):
 
     user_config = {
         "user_id": req.user_id,
+        "strategy": "strategy_one",
         "mode": "default",
-        "sl": 10,
-        "target": 20,
+        "sl": 25,
+        "target": 50,
         "index": "NIFTY",
         "lots": 1,
         "is_running": True,
