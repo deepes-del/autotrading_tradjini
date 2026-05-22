@@ -46,10 +46,11 @@ _yf_cache = {}
 def _headers(broker_ctx: dict) -> dict:
     """
     Build per-user auth headers dynamically.
-    broker_ctx must contain 'api_key' and 'access_token'.
+    Falls back to config.API_KEY if broker_ctx does not contain 'api_key'.
     """
+    api_key = broker_ctx.get('api_key') or getattr(config, 'API_KEY', '')
     return {
-        "Authorization": f"Bearer {broker_ctx['api_key']}:{broker_ctx['access_token']}",
+        "Authorization": f"Bearer {api_key}:{broker_ctx['access_token']}",
         "Content-Type": "application/json",
     }
 
