@@ -14,7 +14,7 @@ import requests
 
 BASE_URL = "https://api.tradejini.com/v2"
 
-_cached_instrument_list = None
+instrument_cache = {}
 
 
 def _headers(user_id: str, content_type: str | None = None) -> dict:
@@ -180,12 +180,8 @@ def _normalize_instrument_record(record: dict) -> dict:
     return item
 
 
-def _fetch_symbol_groups() -> list[dict]:
-    payload = _public_get(
-        f"{BASE_URL}/api/mkt-data/scrips/symbol-store",
-        params={"version": 0},
-        timeout=30,
-    )
+def _fetch_symbol_groups(user_id: str) -> list[dict]:
+    payload = _get("/api/mkt-data/scrips/symbol-store", user_id, params={"version": 0})
     rows = _extract_rows(payload)
     return [row for row in rows if isinstance(row, dict)]
 
@@ -197,11 +193,20 @@ def _is_option_group(group: dict) -> bool:
     return any(token in marker for token in ("strike", "option", "opt", "deriv", "nfo", "fo"))
 
 
-def _fetch_group_scrips(group_name: str) -> list[dict]:
+def _fetch_group_scrips(group_name: str, user_id: str) -> list[dict]:
     url = f"{BASE_URL}/api/mkt-data/scrips/symbol-store/{quote(group_name, safe='')}"
 
     try:
-        response = requests.get(url, headers={"Accept": "application/json"}, timeout=45)
+        from session_manager import get_user_session
+        broker_ctx = get_user_session(user_id)
+        if not broker_ctx:
+            return []
+
+        headers = {
+            "Authorization": f"Bearer {broker_ctx['api_key']}:{broker_ctx['access_token']}",
+            "Accept": "application/json"
+        }
+        response = requests.get(url, headers=headers, timeout=45)
         if response.status_code != 200:
             logging.error(
                 f"[SCRIP FAIL] GET {group_name} | Status: {response.status_code} | Response: {response.text}"
@@ -226,21 +231,19 @@ def _fetch_group_scrips(group_name: str) -> list[dict]:
 
 def get_instrument_list(user_id: str) -> pd.DataFrame:
     """
-    Download option-capable scrip master data and cache it.
-
-    The first symbol-store endpoint returns group metadata under a wrapper like
-    {"s": "ok", "d": {"symbolStore": [...]}}. We then fetch the real scrip rows
-    group by group.
+    Download option-capable scrip master data and cache it per user.
     """
-    del user_id  # Public endpoint; broker session is not required here.
+    global instrument_cache
+    now = time.time()
 
-    global _cached_instrument_list
-    if _cached_instrument_list is not None and not _cached_instrument_list.empty:
-        return _cached_instrument_list.copy()
+    if user_id in instrument_cache:
+        cached_data = instrument_cache[user_id]
+        if (now - cached_data["loaded_at"]) < 900:  # 15 minutes
+            return cached_data["data"].copy()
 
-    groups = _fetch_symbol_groups()
+    groups = _fetch_symbol_groups(user_id)
     if not groups:
-        logging.error("[INSTRUMENTS] Failed to fetch symbol store groups.")
+        logging.error(f"[INSTRUMENTS] Failed to fetch symbol store groups for {user_id}.")
         return pd.DataFrame()
 
     option_groups = [group for group in groups if _is_option_group(group)]
@@ -251,7 +254,7 @@ def get_instrument_list(user_id: str) -> pd.DataFrame:
         group_name = group.get("name")
         if not group_name:
             continue
-        rows = _fetch_group_scrips(str(group_name))
+        rows = _fetch_group_scrips(str(group_name), user_id)
         if rows:
             records.extend(rows)
 
@@ -261,12 +264,12 @@ def get_instrument_list(user_id: str) -> pd.DataFrame:
             group_name = group.get("name")
             if not group_name:
                 continue
-            rows = _fetch_group_scrips(str(group_name))
+            rows = _fetch_group_scrips(str(group_name), user_id)
             if rows:
                 records.extend(rows)
 
     if not records:
-        logging.error("[INSTRUMENTS] No scrip records were loaded.")
+        logging.error(f"[INSTRUMENTS] No scrip records were loaded for {user_id}.")
         return pd.DataFrame()
 
     df = pd.DataFrame(records)
@@ -275,8 +278,24 @@ def get_instrument_list(user_id: str) -> pd.DataFrame:
     else:
         df = df.drop_duplicates().reset_index(drop=True)
 
-    _cached_instrument_list = df
-    logging.info(f"[INSTRUMENTS] Loaded {len(df)} scrip records.")
+    instrument_cache[user_id] = {
+        "data": df,
+        "loaded_at": now
+    }
+    
+    expiry_log = "N/A"
+    if not df.empty and "expiry" in df.columns:
+        try:
+            df_opt = df[df["expiry"].notna()].copy()
+            df_opt["expiry_dt"] = pd.to_datetime(df_opt["expiry"], errors="coerce")
+            today = pd.Timestamp(datetime.date.today())
+            df_opt = df_opt[df_opt["expiry_dt"] >= today].sort_values("expiry_dt")
+            if not df_opt.empty:
+                expiry_log = df_opt.iloc[0]["expiry_dt"].strftime('%Y-%m-%d')
+        except Exception:
+            pass
+
+    logging.info(f"[INSTRUMENT LOAD]\nUser: {user_id}\nLoaded Instruments: {len(df)}\nExpiry: {expiry_log}")
     return df.copy()
 
 
@@ -315,10 +334,7 @@ def select_atm_option(
 
         step = 50 if index_name.upper() == "NIFTY" else 100
         atm_strike = round(index_ltp / step) * step
-        logging.info(
-            f"Selecting ATM option for {index_name} | Index LTP: {index_ltp} | Target Strike: {atm_strike}"
-        )
-
+        
         df_opt = df_inst.copy()
 
         if "exchange" in df_opt.columns:
@@ -340,9 +356,7 @@ def select_atm_option(
             ]
 
         if df_opt.empty:
-            logging.error(f"[ATM ERROR] No PE options found for {index_name}.")
-            logging.error(f"Available columns: {df_inst.columns.tolist()}")
-            logging.error(f"Sample rows: {df_inst.head(3).to_dict('records')}")
+            logging.info(df_inst.head(10))
             return None, None, None
 
         df_opt["expiry_dt"] = pd.to_datetime(df_opt["expiry"], errors="coerce")
@@ -351,10 +365,14 @@ def select_atm_option(
         df_opt = df_opt[df_opt["expiry_dt"] >= today].sort_values("expiry_dt")
 
         if df_opt.empty:
-            logging.error(f"[ATM ERROR] No valid future expiries found for {index_name}")
+            logging.info(df_inst.head(10))
             return None, None, None
 
         closest_expiry = df_opt.iloc[0]["expiry_dt"]
+        nearest_expiry_str = closest_expiry.strftime('%Y-%m-%d')
+
+        logging.info(f"[ATM DEBUG]\nUser: {user_id}\nIndex: {index_ltp}\nATM: {atm_strike}\nOption Type: PE\nNearest Expiry: {nearest_expiry_str}\nTotal Symbols: {len(df_inst)}")
+
         df_weekly = df_opt[df_opt["expiry_dt"] == closest_expiry].copy()
 
         df_weekly["strike_num"] = pd.to_numeric(df_weekly["strike"], errors="coerce")
@@ -365,7 +383,7 @@ def select_atm_option(
         df_weekly = df_weekly[df_weekly["strike_norm"].notna()]
 
         if df_weekly.empty:
-            logging.error(f"[ATM ERROR] Strike data missing for {index_name}")
+            logging.info(df_inst.head(10))
             return None, None, None
 
         df_weekly["strike_diff"] = (df_weekly["strike_norm"] - float(atm_strike)).abs()
@@ -383,17 +401,16 @@ def select_atm_option(
 
         option_ltp = data_fetcher.get_ltp(user_id, "NFO", best_symbol, best_token)
         if option_ltp is None:
-            logging.error(f"[ATM ERROR] Could not fetch LTP for {best_symbol} ({best_token})")
+            logging.info(df_inst.head(10))
             return None, None, None
 
-        logging.info(f"Selected ATM: {best_symbol} (symId: {best_token}) | Price: {option_ltp}")
+        logging.info(f"[ATM FOUND]\nUser: {user_id}\nSymbol: {best_symbol}\nToken: {best_token}\nLTP: {option_ltp}")
         return best_token, best_symbol, float(option_ltp)
 
     except Exception as exc:
         logging.error(f"[CRITICAL ATM ERROR] {exc}")
         if df_inst is not None and not df_inst.empty:
-            logging.error(f"Columns: {df_inst.columns.tolist()}")
-            logging.error(f"Sample rows: {df_inst.head(3).to_dict('records')}")
+            logging.info(df_inst.head(10))
         return None, None, None
 
 

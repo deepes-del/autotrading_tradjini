@@ -224,11 +224,7 @@ def _run_bot_logic(user_config: dict) -> None:
         add_log(user_id, "ERROR: No active broker session found. Please reconnect broker.")
         return
 
-    # ── Load instruments ──────────────────────────────────────
-    inst_df = order_manager.get_instrument_list(user_id)
-    if inst_df.empty:
-        add_log(user_id, "ERROR: Failed to load instruments.")
-        return
+
 
     # ── Initialise EMA via yfinance ───────────────────────────
     add_log(user_id, "Initialising EMA from yfinance...")
@@ -552,9 +548,68 @@ def _run_bot_logic(user_config: dict) -> None:
                         
                         add_log(user_id, f"📊 Strategy Signal Detected (INDEX):\ncandle_range: {candle_range:.2f}\nentry_price: {entry_price:.2f}")
 
+                        broker_ctx = get_user_session(user_id)
+                        inst_df = order_manager.get_instrument_list(user_id)
+                        
+                        logging.info(f"""
+
+[REAL BOT DEBUG]
+
+USER:
+{user_id}
+
+CLIENT:
+{broker_ctx.get("client_id")}
+
+INSTRUMENT COUNT:
+{len(inst_df)}
+
+INDEX:
+{user_index}
+
+LTP:
+{index_ltp}
+
+""")
+
+                        logging.info(f"""
+
+[ATM CALL]
+
+user_id={user_id}
+
+df_type={type(inst_df)}
+
+index_ltp={index_ltp}
+
+index_name={user_index}
+
+""")
+
                         opt_tok, opt_sym, option_ltp = order_manager.select_atm_option(
-                            user_id, inst_df, index_ltp, user_index
+                            user_id=user_id,
+                            df_inst=inst_df,
+                            index_ltp=index_ltp,
+                            index_name=user_index
                         )
+                        
+                        logging.info(f"""
+
+[ATM RESULT]
+
+User:
+{user_id}
+
+Token:
+{opt_tok}
+
+Symbol:
+{opt_sym}
+
+LTP:
+{option_ltp}
+
+""")
                         
                         add_log(user_id, f"🔍 ATM Result: tok={opt_tok} sym={opt_sym} ltp={option_ltp}")
 
