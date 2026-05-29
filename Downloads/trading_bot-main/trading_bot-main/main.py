@@ -32,8 +32,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 running_bots: dict = {}   # user_id -> {"thread": Thread, "config": dict}
 bot_lock = threading.Lock()
 user_logs: dict = {}       # user_id -> [str, ...]
-_last_refresh_date = None
-
 
 
 # ── Logging helpers ──────────────────────────────────────────
@@ -56,10 +54,7 @@ def add_log(user_id: str, message: str) -> None:
     if len(user_logs[user_id]) > 200:
         user_logs[user_id].pop(0)
     user_logs[user_id].append(message)
-    try:
-        print(f"[LOG][{user_id}] {message}")
-    except UnicodeEncodeError:
-        print(f"[LOG][{user_id}] {message.encode('ascii', 'ignore').decode('ascii')}")
+    print(f"[LOG][{user_id}] {message}")
 
 
 # ── Trade persistence helpers ────────────────────────────────
@@ -220,13 +215,11 @@ def _run_bot_logic(user_config: dict) -> None:
 
     # ── Fetch broker session ──────────────────────────────────
     add_log(user_id, "Fetching broker session...")
-    from session_manager import get_user_session
-    broker_ctx = get_user_session(user_id)
+    from session_manager import build_broker_ctx
+    broker_ctx = build_broker_ctx(user_id)
     if not broker_ctx:
         add_log(user_id, "ERROR: No active broker session found. Please reconnect broker.")
         return
-
-
 
     # ── Initialise EMA via yfinance ───────────────────────────
     add_log(user_id, "Initialising EMA from yfinance...")
@@ -305,12 +298,12 @@ def _run_bot_logic(user_config: dict) -> None:
 
                 # Cancel any pending SL order first
                 if active_trade.get("sl_order_id") and active_trade["sl_order_id"] != "UNKNOWN":
-                    order_manager.cancel_order(user_id, active_trade["sl_order_id"])
+                    order_manager.cancel_order(broker_ctx, active_trade["sl_order_id"])
                     logging.info(f"[EOD] SL order {active_trade['sl_order_id']} cancelled.")
 
                 # Retry SELL — place_sell_order now handles retries internally
                 sell_res = order_manager.place_sell_order(
-                    user_id, active_trade["opt_tok"],
+                    broker_ctx, active_trade["opt_tok"],
                     active_trade["opt_sym"], active_trade["trade_qty"]
                 )
                 if sell_res.get("success"):
@@ -319,7 +312,7 @@ def _run_bot_logic(user_config: dict) -> None:
                     logging.info(f"[EOD] SELL confirmed | Order: {sell_res['order_id']}")
                     # ── Close trade in Supabase ───────────────
                     current_ltp = data_fetcher.get_ltp(
-                        user_id, "NFO",
+                        broker_ctx, "NFO",
                         active_trade["opt_sym"], active_trade["opt_tok"]
                     )
                     eod_exit_price = float(current_ltp) if current_ltp else active_trade["entry_price"]
@@ -351,7 +344,7 @@ def _run_bot_logic(user_config: dict) -> None:
         # ── Update Candle Data (Every 5 mins or on loop) ──────
         # We check for new candle fetch every few seconds, but the fetcher handles caching.
         fetch_success, updated_df = data_fetcher.update_hybrid_ema(
-            global_df, user_id, EXCHANGE, symbol_token
+            global_df, broker_ctx, EXCHANGE, symbol_token
         )
         if fetch_success and updated_df is not None:
             global_df = updated_df
@@ -418,7 +411,7 @@ def _run_bot_logic(user_config: dict) -> None:
         if active_trade is not None:
             # 1. Track the option premium price
             current_opt_ltp_raw = data_fetcher.get_ltp(
-                user_id, "NFO", active_trade["opt_sym"], active_trade["opt_tok"]
+                broker_ctx, "NFO", active_trade["opt_sym"], active_trade["opt_tok"]
             )
             if current_opt_ltp_raw is not None:
                 current_opt_ltp = float(current_opt_ltp_raw)
@@ -429,7 +422,7 @@ def _run_bot_logic(user_config: dict) -> None:
                     
                     sl_order_id = active_trade.get("sl_order_id")
                     if sl_order_id and sl_order_id != "UNKNOWN":
-                        cancel_ok = order_manager.cancel_order(user_id, sl_order_id)
+                        cancel_ok = order_manager.cancel_order(broker_ctx, sl_order_id)
                         if cancel_ok:
                             add_log(user_id, "✅ Broker SL order cancelled successfully.")
                         else:
@@ -437,7 +430,7 @@ def _run_bot_logic(user_config: dict) -> None:
 
                     # Place the profit booking (market sell) order
                     tgt_res = order_manager.place_sell_order(
-                        user_id, active_trade["opt_tok"],
+                        broker_ctx, active_trade["opt_tok"],
                         active_trade["opt_sym"], active_trade["trade_qty"]
                     )
                     if tgt_res.get("success"):
@@ -458,7 +451,7 @@ def _run_bot_logic(user_config: dict) -> None:
 
                 if sl_order_id and sl_order_id != "UNKNOWN":
                     # Check status of the active SL order at the broker
-                    sl_order_details = order_manager.get_order_status(user_id, sl_order_id)
+                    sl_order_details = order_manager.get_order_status(broker_ctx, sl_order_id)
                     if sl_order_details:
                         status = str(sl_order_details.get("status", "")).lower()
                         
@@ -471,7 +464,7 @@ def _run_bot_logic(user_config: dict) -> None:
                             if current_opt_ltp <= active_trade["option_sl"]:
                                 add_log(user_id, f"⚠️ Broker SL order was {status.upper()}! Placing emergency market exit at ₹{current_opt_ltp:.2f}...")
                                 sl_res = order_manager.place_sell_order(
-                                    user_id, active_trade["opt_tok"],
+                                    broker_ctx, active_trade["opt_tok"],
                                     active_trade["opt_sym"], active_trade["trade_qty"]
                                 )
                                 if sl_res.get("success"):
@@ -484,7 +477,7 @@ def _run_bot_logic(user_config: dict) -> None:
                     if current_opt_ltp <= active_trade["option_sl"]:
                         add_log(user_id, f"🛑 Option price dropped to ₹{current_opt_ltp:.2f} (SL: ₹{active_trade['option_sl']:.2f}). Placing market sell...")
                         sl_res = order_manager.place_sell_order(
-                            user_id, active_trade["opt_tok"],
+                            broker_ctx, active_trade["opt_tok"],
                             active_trade["opt_sym"], active_trade["trade_qty"]
                         )
                         if sl_res.get("success"):
@@ -511,7 +504,7 @@ def _run_bot_logic(user_config: dict) -> None:
                 last_log_time = time.time()
 
             index_ltp_raw = data_fetcher.get_ltp(
-                user_id, EXCHANGE, user_index, symbol_token
+                broker_ctx, EXCHANGE, user_index, symbol_token
             )
 
             if index_ltp_raw is not None:
@@ -550,83 +543,9 @@ def _run_bot_logic(user_config: dict) -> None:
                         
                         add_log(user_id, f"📊 Strategy Signal Detected (INDEX):\ncandle_range: {candle_range:.2f}\nentry_price: {entry_price:.2f}")
 
-                        if order_manager.GLOBAL_INSTRUMENT_CACHE.get("data") is None:
-                            order_manager.load_global_instruments()
-                        # Daily refresh at 08:30 IST (03:00 UTC). Refresh once per day.
-                        ist_now = datetime.datetime.now(config.TIMEZONE)
-                        today_date = ist_now.date()
-                        refresh_hour = 8
-                        refresh_minute = 30
-                        if ist_now.hour == refresh_hour and ist_now.minute == refresh_minute:
-                            global _last_refresh_date
-                            if _last_refresh_date != today_date:
-                                order_manager.refresh_global_instruments()
-                                _last_refresh_date = today_date
-                                add_log(user_id, "[NFO DAILY REFRESH] performed")
-
-                        # Fetch instrument list from global cache
-                        inst_df = order_manager.get_instrument_list(user_id)
-                        logging.info(f"[ATM INSTRUMENTS] User: {user_id} Instrument count: {len(inst_df)}")
-
-                        logging.info(f"""
-
-[REAL BOT DEBUG]
-
-USER:
-{user_id}
-
-CLIENT:
-{broker_ctx.get("client_id")}
-
-INSTRUMENT COUNT:
-{len(inst_df)}
-
-INDEX:
-{user_index}
-
-LTP:
-{index_ltp}
-
-""")
-
-                        logging.info(f"""
-
-[ATM CALL]
-
-user_id={user_id}
-
-df_type={type(inst_df)}
-
-index_ltp={index_ltp}
-
-index_name={user_index}
-
-""")
-
                         opt_tok, opt_sym, option_ltp = order_manager.select_atm_option(
-                            user_id=user_id,
-                            df_inst=inst_df,
-                            index_ltp=index_ltp,
-                            index_name=user_index
+                            broker_ctx, user_id, index_ltp, user_index
                         )
-                        
-                        logging.info(f"""
-
-[ATM RESULT]
-
-User:
-{user_id}
-
-Token:
-{opt_tok}
-
-Symbol:
-{opt_sym}
-
-LTP:
-{option_ltp}
-
-""")
                         
                         add_log(user_id, f"🔍 ATM Result: tok={opt_tok} sym={opt_sym} ltp={option_ltp}")
 
@@ -643,14 +562,14 @@ LTP:
 
                             # ── 2. Place BUY and validate strictly ──────────────
                             buy_res = order_manager.place_buy_order(
-                                user_id, opt_tok, opt_sym, trade_qty
+                                broker_ctx, opt_tok, opt_sym, trade_qty
                             )
 
                             if buy_res.get("success"):
                                 buy_order_id = buy_res["order_id"]
 
                                 # ── 3. Verify Order Status with Broker ──────────────
-                                order_details = order_manager.get_order_status(user_id, buy_order_id)
+                                order_details = order_manager.get_order_status(broker_ctx, buy_order_id)
                                 order_status = str(order_details.get("status", "")).lower() if order_details else "unknown"
 
                                 if order_status in ["complete", "completed", "executed"]:
@@ -689,7 +608,7 @@ LTP:
                                     # ── 5.5 Place Stop-Loss Order at Broker ──────────────
                                     add_log(user_id, f"📤 Placing Stoploss order at broker for {opt_sl_price:.2f}...")
                                     sl_res = order_manager.place_sl_order(
-                                        user_id, opt_tok, opt_sym, trade_qty, opt_sl_price
+                                        broker_ctx, opt_tok, opt_sym, trade_qty, opt_sl_price
                                     )
                                     sl_order_id = "UNKNOWN"
                                     if sl_res.get("success"):

@@ -12,73 +12,16 @@ from urllib.parse import quote
 import pandas as pd
 import requests
 
-# ── Global NFO instrument cache ───────────────────────────────────────────────
-# Holds the full NFO instrument master for all users. Loaded once at startup and
-# refreshed daily. Structure: {"data": DataFrame|None, "loaded_at": datetime|None, "instrument_count": int}
-GLOBAL_INSTRUMENT_CACHE = {
-    "data": None,
-    "loaded_at": None,
-    "instrument_count": 0,
-}
-
-def load_global_instruments() -> bool:
-    """Download the complete NFO instrument list using a system user session.
-
-    Returns True on success, False on failure. Updates GLOBAL_INSTRUMENT_CACHE.
-    """
-    # Use a dedicated system user ID for fetching instruments. This user must have a valid
-    # broker session configured in the database. If not, the call will fail and we log.
-    SYSTEM_USER_ID = "SYSTEM_USER"
-    try:
-        df = get_instrument_list(SYSTEM_USER_ID)
-        if df is None or df.empty:
-            raise ValueError("Fetched instrument DataFrame is empty")
-        GLOBAL_INSTRUMENT_CACHE["data"] = df
-        GLOBAL_INSTRUMENT_CACHE["loaded_at"] = datetime.datetime.now()
-        GLOBAL_INSTRUMENT_CACHE["instrument_count"] = len(df)
-        logging.info(
-            "[NFO STARTUP LOAD]\nInstrument Count: {}\nLoaded At: {}\nStatus: SUCCESS".format(
-                GLOBAL_INSTRUMENT_CACHE["instrument_count"],
-                GLOBAL_INSTRUMENT_CACHE["loaded_at"].strftime("%Y-%m-%d %H:%M:%S"),
-            )
-        )
-        return True
-    except Exception as exc:
-        logging.error(f"[NFO STARTUP LOAD] Failed to load instruments: {exc}")
-        return False
-
-def refresh_global_instruments() -> None:
-    """Refresh the global NFO instrument cache (daily). Logs old and new counts."""
-    old_count = GLOBAL_INSTRUMENT_CACHE.get("instrument_count", 0)
-    success = load_global_instruments()
-    new_count = GLOBAL_INSTRUMENT_CACHE.get("instrument_count", 0)
-    status = "SUCCESS" if success else "FAIL"
-    logging.info(
-        "[NFO DAILY REFRESH]\nOld Count: {}\nNew Count: {}\nStatus: {}".format(old_count, new_count, status)
-    )
-
-# Load instruments at module import (server startup)
-load_global_instruments()
-
-# Schedule daily refresh at 08:30 AM IST using a cron expression (5-field).
-# This will run in the background; the scheduler is part of the core utilities.
-# The schedule tool will be invoked later in main.py.
-
 BASE_URL = "https://api.tradejini.com/v2"
 
-instrument_cache = {}
+user_option_cache = {}
 
 
-def _headers(user_id: str, content_type: str | None = None) -> dict:
+def _headers(broker_ctx: dict, content_type: str | None = None) -> dict:
     """
     Build per-user auth headers dynamically.
-    Fetches the latest broker_ctx from Supabase.
+    broker_ctx must contain 'api_key' and 'access_token'.
     """
-    from session_manager import get_user_session
-    broker_ctx = get_user_session(user_id)
-    if not broker_ctx:
-        raise ValueError(f"No active broker session for user {user_id}")
-    
     headers = {
         "Authorization": f"Bearer {broker_ctx['api_key']}:{broker_ctx['access_token']}",
         "Accept": "application/json",
@@ -113,10 +56,10 @@ def _public_get(url: str, params: dict | None = None, timeout: int = 30):
     return None
 
 
-def _get(path: str, user_id: str, params: dict | None = None):
+def _get(path: str, broker_ctx: dict, params: dict | None = None):
     url = f"{BASE_URL}{path}"
     try:
-        response = requests.get(url, headers=_headers(user_id), params=params, timeout=15)
+        response = requests.get(url, headers=_headers(broker_ctx), params=params, timeout=15)
         if response.status_code == 200:
             return _response_payload(response)
         logging.error(
@@ -127,12 +70,12 @@ def _get(path: str, user_id: str, params: dict | None = None):
     return None
 
 
-def _post_form(path: str, user_id: str, payload: dict):
+def _post_form(path: str, broker_ctx: dict, payload: dict):
     url = f"{BASE_URL}{path}"
     try:
         response = requests.post(
             url,
-            headers=_headers(user_id, "application/x-www-form-urlencoded"),
+            headers=_headers(broker_ctx, "application/x-www-form-urlencoded"),
             data=payload,
             timeout=15,
         )
@@ -146,10 +89,10 @@ def _post_form(path: str, user_id: str, payload: dict):
     return None
 
 
-def _delete(path: str, user_id: str, params: dict):
+def _delete(path: str, broker_ctx: dict, params: dict):
     url = f"{BASE_URL}{path}"
     try:
-        response = requests.delete(url, headers=_headers(user_id), params=params, timeout=15)
+        response = requests.delete(url, headers=_headers(broker_ctx), params=params, timeout=15)
         if response.status_code == 200:
             return _response_payload(response)
         logging.error(
@@ -232,8 +175,12 @@ def _normalize_instrument_record(record: dict) -> dict:
     return item
 
 
-def _fetch_symbol_groups(user_id: str) -> list[dict]:
-    payload = _get("/api/mkt-data/scrips/symbol-store", user_id, params={"version": 0})
+def _fetch_symbol_groups(broker_ctx: dict) -> list[dict]:
+    payload = _get(
+        "/api/mkt-data/scrips/symbol-store",
+        broker_ctx,
+        params={"version": 0},
+    )
     rows = _extract_rows(payload)
     return [row for row in rows if isinstance(row, dict)]
 
@@ -245,20 +192,11 @@ def _is_option_group(group: dict) -> bool:
     return any(token in marker for token in ("strike", "option", "opt", "deriv", "nfo", "fo"))
 
 
-def _fetch_group_scrips(group_name: str, user_id: str) -> list[dict]:
+def _fetch_group_scrips(group_name: str, broker_ctx: dict) -> list[dict]:
     url = f"{BASE_URL}/api/mkt-data/scrips/symbol-store/{quote(group_name, safe='')}"
 
     try:
-        from session_manager import get_user_session
-        broker_ctx = get_user_session(user_id)
-        if not broker_ctx:
-            return []
-
-        headers = {
-            "Authorization": f"Bearer {broker_ctx['api_key']}:{broker_ctx['access_token']}",
-            "Accept": "application/json"
-        }
-        response = requests.get(url, headers=headers, timeout=45)
+        response = requests.get(url, headers=_headers(broker_ctx, "application/json"), timeout=45)
         if response.status_code != 200:
             logging.error(
                 f"[SCRIP FAIL] GET {group_name} | Status: {response.status_code} | Response: {response.text}"
@@ -281,58 +219,100 @@ def _fetch_group_scrips(group_name: str, user_id: str) -> list[dict]:
         return []
 
 
-def get_instrument_list(user_id: str) -> pd.DataFrame:
-    """
-    Return the global NFO instrument master DataFrame.
-    If not loaded, attempt to load it now.
-    """
-    # Fail‑safe: ensure cache is populated
-    if GLOBAL_INSTRUMENT_CACHE["data"] is None:
-        load_global_instruments()
-    df = GLOBAL_INSTRUMENT_CACHE["data"]
-    if df is None:
-        logging.error("[INSTRUMENT LOAD] Global instrument cache is empty after load attempt.")
+def _fetch_user_option_instruments(broker_ctx: dict) -> pd.DataFrame:
+    groups = _fetch_symbol_groups(broker_ctx)
+    if not groups:
+        logging.error("[INSTRUMENTS] Failed to fetch symbol store groups.")
         return pd.DataFrame()
-    # Return a copy to avoid accidental mutation
-    return df.copy()
 
+    option_groups = [group for group in groups if _is_option_group(group)]
+    target_groups = option_groups or groups
 
-def _filter_index_rows(df_inst: pd.DataFrame, index_name: str) -> pd.Series:
-    search = df_inst.get("searchText", pd.Series("", index=df_inst.index)).fillna("").astype(str)
-    upper_name = index_name.upper()
+    records: list[dict] = []
+    for group in target_groups:
+        group_name = group.get("name")
+        if not group_name:
+            continue
+        rows = _fetch_group_scrips(str(group_name), broker_ctx)
+        if rows:
+            records.extend(rows)
 
-    if upper_name == "BANKNIFTY":
-        return search.str.contains("BANKNIFTY", na=False)
+    if not records and option_groups:
+        logging.warning("[INSTRUMENTS] Option-group fetch returned nothing. Falling back to all groups.")
+        for group in groups:
+            group_name = group.get("name")
+            if not group_name:
+                continue
+            rows = _fetch_group_scrips(str(group_name), broker_ctx)
+            if rows:
+                records.extend(rows)
 
-    if upper_name == "NIFTY":
-        blocked = ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
-        mask = search.str.contains("NIFTY", na=False)
-        for token in blocked:
-            mask &= ~search.str.contains(token, na=False)
-        return mask
+    if not records:
+        logging.error("[INSTRUMENTS] No scrip records were loaded from API.")
+        return pd.DataFrame()
 
-    return search.str.contains(upper_name, na=False)
+    df = pd.DataFrame(records)
+    if "symId" in df.columns:
+        df = df[df["symId"].notna()].drop_duplicates(subset=["symId"]).reset_index(drop=True)
+    else:
+        df = df.drop_duplicates().reset_index(drop=True)
+
+    return df
 
 
 def select_atm_option(
+    broker_ctx: dict,
     user_id: str,
-    df_inst: pd.DataFrame,
     index_ltp: float,
     index_name: str = "NIFTY",
 ):
     """
     Select the nearest-expiry ATM PE option and fetch its latest price.
+    Uses per-user isolated cache for tokens.
 
     Returns (symId, display_symbol, ltp) or (None, None, None).
     """
     try:
-        if df_inst is None or df_inst.empty:
-            logging.error("[ATM ERROR] Instrument DataFrame is empty.")
-            return None, None, None
-
         step = 50 if index_name.upper() == "NIFTY" else 100
         atm_strike = round(index_ltp / step) * step
+        opt_type = "PE"
         
+        cache_key = f"{index_name}_{atm_strike}_{opt_type}"
+        
+        # 1. Check user cache
+        now = time.time()
+        if user_id not in user_option_cache:
+            user_option_cache[user_id] = {}
+            
+        user_cache = user_option_cache[user_id]
+        
+        if cache_key in user_cache:
+            cached_data = user_cache[cache_key]
+            if now < cached_data["expires_at"]:
+                logging.info(
+                    f"[OPTION TOKEN]\nUser: {user_id}\nSearching: {index_name} {atm_strike} {opt_type}\nResult: Token={cached_data['token']}\nSource: CACHE"
+                )
+                
+                # Fetch LTP using cached token
+                import data_fetcher
+                option_ltp = data_fetcher.get_ltp(broker_ctx, "NFO", cached_data["symbol"], cached_data["token"])
+                if option_ltp is None:
+                    logging.error(f"[ATM ERROR] Could not fetch LTP for {cached_data['symbol']} ({cached_data['token']})")
+                    return None, None, None
+                
+                return cached_data["token"], cached_data["symbol"], float(option_ltp)
+        
+        # 2. Cache miss — Fetch from API
+        logging.info(
+            f"[OPTION TOKEN]\nUser: {user_id}\nSearching: {index_name} {atm_strike} {opt_type}\nResult: Fetching...\nSource: API"
+        )
+        
+        df_inst = _fetch_user_option_instruments(broker_ctx)
+        
+        if df_inst is None or df_inst.empty:
+            logging.error("[ATM ERROR] Fetched Instrument DataFrame is empty.")
+            return None, None, None
+
         df_opt = df_inst.copy()
 
         if "exchange" in df_opt.columns:
@@ -344,17 +324,17 @@ def select_atm_option(
         df_opt = df_opt[_filter_index_rows(df_opt, index_name)]
 
         if "optType" in df_opt.columns:
-            df_opt = df_opt[df_opt["optType"].astype(str).str.upper().str.strip() == "PE"]
+            df_opt = df_opt[df_opt["optType"].astype(str).str.upper().str.strip() == opt_type]
         else:
             df_opt = df_opt[
                 df_opt.get("searchText", pd.Series("", index=df_opt.index))
                 .astype(str)
                 .str.upper()
-                .str.endswith("PE")
+                .str.endswith(opt_type)
             ]
 
         if df_opt.empty:
-            logging.info(df_inst.head(10))
+            logging.error(f"[ATM ERROR] No {opt_type} options found for {index_name}.")
             return None, None, None
 
         df_opt["expiry_dt"] = pd.to_datetime(df_opt["expiry"], errors="coerce")
@@ -363,14 +343,10 @@ def select_atm_option(
         df_opt = df_opt[df_opt["expiry_dt"] >= today].sort_values("expiry_dt")
 
         if df_opt.empty:
-            logging.info(df_inst.head(10))
+            logging.error(f"[ATM ERROR] No valid future expiries found for {index_name}")
             return None, None, None
 
         closest_expiry = df_opt.iloc[0]["expiry_dt"]
-        nearest_expiry_str = closest_expiry.strftime('%Y-%m-%d')
-
-        logging.info(f"[ATM DEBUG]\nUser: {user_id}\nIndex: {index_ltp}\nATM: {atm_strike}\nOption Type: PE\nNearest Expiry: {nearest_expiry_str}\nTotal Symbols: {len(df_inst)}")
-
         df_weekly = df_opt[df_opt["expiry_dt"] == closest_expiry].copy()
 
         df_weekly["strike_num"] = pd.to_numeric(df_weekly["strike"], errors="coerce")
@@ -381,7 +357,7 @@ def select_atm_option(
         df_weekly = df_weekly[df_weekly["strike_norm"].notna()]
 
         if df_weekly.empty:
-            logging.info(df_inst.head(10))
+            logging.error(f"[ATM ERROR] Strike data missing for {index_name}")
             return None, None, None
 
         df_weekly["strike_diff"] = (df_weekly["strike_norm"] - float(atm_strike)).abs()
@@ -395,20 +371,30 @@ def select_atm_option(
             or best_token
         )
 
+        # 3. Store in user's isolated cache for 10 minutes (600s)
+        user_cache[cache_key] = {
+            "token": best_token,
+            "symbol": best_symbol,
+            "expires_at": time.time() + 600
+        }
+        
+        logging.info(f"[OPTION TOKEN] Successfully cached {cache_key} -> {best_token} for user {user_id}")
+
         import data_fetcher
 
-        option_ltp = data_fetcher.get_ltp(user_id, "NFO", best_symbol, best_token)
+        option_ltp = data_fetcher.get_ltp(broker_ctx, "NFO", best_symbol, best_token)
         if option_ltp is None:
-            logging.info(df_inst.head(10))
+            logging.error(f"[ATM ERROR] Could not fetch LTP for {best_symbol} ({best_token})")
             return None, None, None
 
-        logging.info(f"[ATM FOUND]\nUser: {user_id}\nSymbol: {best_symbol}\nToken: {best_token}\nLTP: {option_ltp}")
+        logging.info(f"Selected ATM: {best_symbol} (symId: {best_token}) | Price: {option_ltp}")
         return best_token, best_symbol, float(option_ltp)
 
     except Exception as exc:
         logging.error(f"[CRITICAL ATM ERROR] {exc}")
         if df_inst is not None and not df_inst.empty:
-            logging.info(df_inst.head(10))
+            logging.error(f"Columns: {df_inst.columns.tolist()}")
+            logging.error(f"Sample rows: {df_inst.head(3).to_dict('records')}")
         return None, None, None
 
 
@@ -427,7 +413,7 @@ def _extract_order_id(payload) -> str | None:
     return str(order_id) if order_id else None
 
 
-def place_order_tradejini(user_id: str, payload: dict) -> dict:
+def place_order_tradejini(broker_ctx: dict, payload: dict) -> dict:
     """
     Central function to place orders with Tradejini.
     Returns structured result: {success, order_id, message, raw}
@@ -441,7 +427,7 @@ def place_order_tradejini(user_id: str, payload: dict) -> dict:
         try:
             import data_fetcher
             sym_id = payload.get("symId")
-            ltp = data_fetcher.get_ltp(user_id, "NFO", "", sym_id)
+            ltp = data_fetcher.get_ltp(broker_ctx, "NFO", "", sym_id)
             if ltp is not None:
                 payload["mktProt"] = 10 if float(ltp) < 100 else 5
                 logging.info(f"[ORDER] mktProt={payload['mktProt']} for LTP {ltp}")
@@ -457,7 +443,7 @@ def place_order_tradejini(user_id: str, payload: dict) -> dict:
     last_raw = None
     for attempt in range(1, 4):
         try:
-            res = _post_form("/api/oms/place-order", user_id, payload)
+            res = _post_form("/api/oms/place-order", broker_ctx, payload)
 
             # Always log raw response for debugging
             logging.info(f"[ORDER RESPONSE] attempt={attempt} | remarks={payload.get('remarks')} | raw={res}")
@@ -498,7 +484,7 @@ def place_order_tradejini(user_id: str, payload: dict) -> dict:
     return _fail(last_msg, last_raw)
 
 
-def place_buy_order(user_id: str, symboltoken: str, symbol: str, qty: int) -> dict:
+def place_buy_order(broker_ctx: dict, symboltoken: str, symbol: str, qty: int) -> dict:
     """Returns structured result dict from place_order_tradejini."""
     payload = {
         "symId": str(symboltoken),
@@ -509,11 +495,11 @@ def place_buy_order(user_id: str, symboltoken: str, symbol: str, qty: int) -> di
         "validity": "day",
         "remarks": "BOTBUY",
     }
-    return place_order_tradejini(user_id, payload)
+    return place_order_tradejini(broker_ctx, payload)
 
 
 def place_sl_order(
-    user_id: str,
+    broker_ctx: dict,
     symboltoken: str,
     symbol: str,
     qty: int,
@@ -530,10 +516,10 @@ def place_sl_order(
         "validity": "day",
         "remarks": "BOTSL",
     }
-    return place_order_tradejini(user_id, payload)
+    return place_order_tradejini(broker_ctx, payload)
 
 
-def place_sell_order(user_id: str, symboltoken: str, symbol: str, qty: int) -> dict:
+def place_sell_order(broker_ctx: dict, symboltoken: str, symbol: str, qty: int) -> dict:
     """Returns structured result dict from place_order_tradejini."""
     payload = {
         "symId": str(symboltoken),
@@ -544,13 +530,13 @@ def place_sell_order(user_id: str, symboltoken: str, symbol: str, qty: int) -> d
         "validity": "day",
         "remarks": "BOTEXIT",
     }
-    return place_order_tradejini(user_id, payload)
+    return place_order_tradejini(broker_ctx, payload)
 
 
 
-def cancel_order(user_id: str, order_id: str) -> bool:
+def cancel_order(broker_ctx: dict, order_id: str) -> bool:
     for attempt in range(1, 4):
-        res = _delete("/api/oms/cancel-order", user_id, {"orderId": str(order_id)})
+        res = _delete("/api/oms/cancel-order", broker_ctx, {"orderId": str(order_id)})
         if isinstance(res, dict) and str(res.get("s", "")).lower() == "ok":
             logging.info(f"[CANCEL] Order {order_id} cancelled (attempt {attempt})")
             return True
@@ -561,12 +547,12 @@ def cancel_order(user_id: str, order_id: str) -> bool:
     return False
 
 
-def is_sl_order_active(user_id: str, order_id: str) -> bool:
+def is_sl_order_active(broker_ctx: dict, order_id: str) -> bool:
     """
     Return True if the SL order is still open or pending in the order list.
     """
     try:
-        res = _get("/api/oms/orders", user_id)
+        res = _get("/api/oms/orders", broker_ctx)
         orders = _extract_rows(res)
 
         for order in orders:
@@ -584,12 +570,12 @@ def is_sl_order_active(user_id: str, order_id: str) -> bool:
     return False
 
 
-def get_order_status(user_id: str, order_id: str) -> dict | None:
+def get_order_status(broker_ctx: dict, order_id: str) -> dict | None:
     """
     Fetch the full order details for a given order_id.
     """
     try:
-        res = _get("/api/oms/orders", user_id)
+        res = _get("/api/oms/orders", broker_ctx)
         orders = _extract_rows(res)
 
         for order in orders:
