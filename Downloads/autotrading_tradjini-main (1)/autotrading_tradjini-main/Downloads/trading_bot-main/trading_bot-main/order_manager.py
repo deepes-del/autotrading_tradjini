@@ -21,30 +21,74 @@ GLOBAL_INSTRUMENT_CACHE = {
     "instrument_count": 0,
 }
 
-def load_global_instruments() -> bool:
-    """Download the complete NFO instrument list using a system user session.
+def download_nfo_instruments(user_id: str) -> pd.DataFrame:
+    """Actually fetch the NFO instruments from the Tradejini API using a given user session."""
+    logging.info(f"[INSTRUMENT FETCH] Fetching master list using user_id: {user_id}")
+    try:
+        groups = _fetch_symbol_groups(user_id)
+        if not groups:
+            logging.error(f"[INSTRUMENT FETCH] No symbol groups returned for user: {user_id}")
+            return pd.DataFrame()
+
+        option_groups = [g for g in groups if _is_option_group(g)]
+        logging.info(f"[INSTRUMENT FETCH] Found {len(option_groups)} NFO option groups.")
+
+        all_records = []
+        for g in option_groups:
+            name = g.get("name")
+            if not name:
+                continue
+            scrips = _fetch_group_scrips(name, user_id)
+            logging.info(f"[INSTRUMENT FETCH] Fetched {len(scrips)} scrips for group {name}")
+            all_records.extend(scrips)
+
+        if not all_records:
+            logging.error("[INSTRUMENT FETCH] No records fetched across all NFO option groups.")
+            return pd.DataFrame()
+
+        df = pd.DataFrame(all_records)
+        logging.info(f"[INSTRUMENT FETCH] Successfully loaded {len(df)} NFO instruments.")
+        return df
+    except Exception as e:
+        logging.error(f"[INSTRUMENT FETCH] Error in download_nfo_instruments: {e}")
+        return pd.DataFrame()
+
+def load_global_instruments(user_id: str = None) -> bool:
+    """Download the complete NFO instrument list using an active user session.
 
     Returns True on success, False on failure. Updates GLOBAL_INSTRUMENT_CACHE.
     """
-    # Use a dedicated system user ID for fetching instruments. This user must have a valid
-    # broker session configured in the database. If not, the call will fail and we log.
-    SYSTEM_USER_ID = "SYSTEM_USER"
+    active_user_id = user_id
+    if not active_user_id:
+        try:
+            from supabase_client import supabase
+            res = supabase.table("broker_sessions").select("user_id").eq("is_active", True).limit(1).execute()
+            if res.data and len(res.data) > 0:
+                active_user_id = res.data[0]["user_id"]
+                logging.info(f"[NFO CACHE] Resolved active user session: {active_user_id}")
+        except Exception as db_exc:
+            logging.error(f"[NFO CACHE] Failed to fetch active user from DB: {db_exc}")
+
+    if not active_user_id:
+        logging.error("[NFO CACHE] No active user_id available to load global NFO instruments.")
+        return False
+
     try:
-        df = get_instrument_list(SYSTEM_USER_ID)
+        df = download_nfo_instruments(active_user_id)
         if df is None or df.empty:
             raise ValueError("Fetched instrument DataFrame is empty")
         GLOBAL_INSTRUMENT_CACHE["data"] = df
         GLOBAL_INSTRUMENT_CACHE["loaded_at"] = datetime.datetime.now()
         GLOBAL_INSTRUMENT_CACHE["instrument_count"] = len(df)
         logging.info(
-            "[NFO STARTUP LOAD]\nInstrument Count: {}\nLoaded At: {}\nStatus: SUCCESS".format(
+            "[NFO CACHE LOAD SUCCESS]\nInstrument Count: {}\nLoaded At: {}\nStatus: SUCCESS".format(
                 GLOBAL_INSTRUMENT_CACHE["instrument_count"],
                 GLOBAL_INSTRUMENT_CACHE["loaded_at"].strftime("%Y-%m-%d %H:%M:%S"),
             )
         )
         return True
     except Exception as exc:
-        logging.error(f"[NFO STARTUP LOAD] Failed to load instruments: {exc}")
+        logging.error(f"[NFO CACHE LOAD FAIL] Failed to load instruments: {exc}")
         return False
 
 def refresh_global_instruments() -> None:
