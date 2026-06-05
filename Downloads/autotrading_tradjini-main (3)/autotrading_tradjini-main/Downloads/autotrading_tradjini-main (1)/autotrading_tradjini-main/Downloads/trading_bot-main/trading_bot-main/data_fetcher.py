@@ -563,6 +563,7 @@ def update_hybrid_ema(
                     f"[SESSION EXPIRED]\n\n"
                     f"User: {user_id}"
                 )
+                print(f"[SESSION EXPIRED]\nUser: {user_id}", flush=True)
                 from session_manager import attempt_broker_auto_login
                 if attempt_broker_auto_login(user_id):
                     # Retry once with fresh token
@@ -692,6 +693,7 @@ def get_ltp(
                         f"[SESSION EXPIRED]\n\n"
                         f"User: {user_id}"
                     )
+                    print(f"[SESSION EXPIRED]\nUser: {user_id}", flush=True)
                     from session_manager import attempt_broker_auto_login
                     if attempt_broker_auto_login(user_id):
                         # Retry once with fresh token

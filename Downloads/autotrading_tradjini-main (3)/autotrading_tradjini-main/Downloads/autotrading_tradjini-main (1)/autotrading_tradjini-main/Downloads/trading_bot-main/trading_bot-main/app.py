@@ -60,9 +60,6 @@ class RegisterRequest(BaseModel):
     occupation: str
     phone: str
     password: str
-    api_key: str
-    client_id: str
-    totp_secret: str
 
 class LoginRequest(BaseModel):
     user_id: str
@@ -70,7 +67,7 @@ class LoginRequest(BaseModel):
 
 class BrokerCredentials(BaseModel):
     session_token: str
-    password: str       # Trading PIN — backend only, never logged
+    password: str | None = None       # Trading PIN — backend only, never logged
     api_key: str | None = None
     client_id: str | None = None
     totp_secret: str | None = None
@@ -109,10 +106,7 @@ def register(req: RegisterRequest):
         req.age,
         req.occupation,
         req.phone,
-        req.password,
-        api_key=req.api_key,
-        client_id=req.client_id,
-        totp_secret=req.totp_secret
+        req.password
     )
 
 
@@ -245,23 +239,28 @@ def connect_broker(creds: BrokerCredentials):
     api_key = creds.api_key
     client_id = creds.client_id
     totp_secret = creds.totp_secret
+    trading_pin = creds.password.strip() if creds.password else None
 
-    if not (api_key and client_id and totp_secret):
+    if not (api_key and client_id and totp_secret and trading_pin):
         try:
             res = supabase.table("broker_configs").select("*").eq("user_id", user_id).execute()
             if not res.data:
                 return {"error": "Broker not configured. Please save settings first."}
             cfg = res.data[0]
-            api_key = api_key or cfg["api_key"]
-            client_id = client_id or cfg["client_id"]
-            totp_secret = totp_secret or cfg["totp_secret"]
+            api_key = api_key or cfg.get("api_key")
+            client_id = client_id or cfg.get("client_id")
+            totp_secret = totp_secret or cfg.get("totp_secret")
+            trading_pin = trading_pin or cfg.get("trading_pin")
         except Exception as e:
             return {"error": f"Failed to fetch stored config: {e}"}
+
+    if not trading_pin:
+        return {"error": "Trading PIN is missing. Please save settings first."}
 
     logging.info(f"[BROKER_LOGIN] Connect request | user={user_id} | client={client_id}")
 
     # ── Call Tradejini login ───────────────────────────────────────────────
-    token, err_msg, is_blocked = login_tradejini(api_key, client_id, creds.password, totp_secret)
+    token, err_msg, is_blocked = login_tradejini(api_key, client_id, trading_pin, totp_secret)
 
     if is_blocked:
         invalidate_user_session(user_id, reason="ACCOUNT_BLOCKED")
@@ -284,12 +283,15 @@ def connect_broker(creds: BrokerCredentials):
             "api_key":     api_key.strip(),
             "client_id":   normalized_client_id,
             "totp_secret": totp_secret.strip(),
-            "trading_pin": creds.password.strip(),
+            "trading_pin": trading_pin.strip(),
             "updated_at":  datetime.now(timezone.utc).isoformat()
         }
         supabase.table("broker_configs").upsert(data, on_conflict="user_id").execute()
+        # Custom required log message
+        print(f"[BROKER CONNECTED]\nUser: {user_id}\nTrading PIN Stored: YES", flush=True)
     except Exception as e:
         logging.error(f"Failed to persist broker credentials in broker_configs: {e}")
+
 
     return {"status": "Broker connected successfully", "user_id": user_id}
 

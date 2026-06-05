@@ -233,6 +233,9 @@ def attempt_broker_auto_login(user_id: str) -> bool:
             f"Trading PIN ✔"
         )
         
+        # Custom required log message
+        print(f"[AUTO LOGIN]\nUser: {user_id}\nUsing Stored Broker Credentials", flush=True)
+        
         # Login
         token, err_msg, is_blocked = login_tradejini(api_key, client_id, trading_pin, totp_secret)
         
@@ -260,6 +263,9 @@ def attempt_broker_auto_login(user_id: str) -> bool:
             f"User: {user_id}\n\n"
             f"New broker session created"
         )
+        
+        # Custom required log message
+        print(f"[SESSION REFRESH SUCCESS]\nUser: {user_id}", flush=True)
         return True
         
     except Exception as exc:

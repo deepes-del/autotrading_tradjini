@@ -622,6 +622,7 @@ def _get(path: str, user_id: str, params: dict | None = None):
                 f"[SESSION EXPIRED]\n\n"
                 f"User: {user_id}"
             )
+            print(f"[SESSION EXPIRED]\nUser: {user_id}", flush=True)
             from session_manager import attempt_broker_auto_login
             if attempt_broker_auto_login(user_id):
                 response = requests.get(url, headers=_headers(user_id), params=params, timeout=15)
@@ -658,6 +659,7 @@ def _post_form(path: str, user_id: str, payload: dict):
                 f"[SESSION EXPIRED]\n\n"
                 f"User: {user_id}"
             )
+            print(f"[SESSION EXPIRED]\nUser: {user_id}", flush=True)
             from session_manager import attempt_broker_auto_login
             if attempt_broker_auto_login(user_id):
                 response = requests.post(
@@ -694,6 +696,7 @@ def _delete(path: str, user_id: str, params: dict):
                 f"[SESSION EXPIRED]\n\n"
                 f"User: {user_id}"
             )
+            print(f"[SESSION EXPIRED]\nUser: {user_id}", flush=True)
             from session_manager import attempt_broker_auto_login
             if attempt_broker_auto_login(user_id):
                 response = requests.delete(url, headers=_headers(user_id), params=params, timeout=15)
@@ -831,6 +834,7 @@ def _fetch_group_scrips(group_name: str, user_id: str) -> list[dict]:
                 f"[SESSION EXPIRED]\n\n"
                 f"User: {user_id}"
             )
+            print(f"[SESSION EXPIRED]\nUser: {user_id}", flush=True)
             from session_manager import attempt_broker_auto_login
             if attempt_broker_auto_login(user_id):
                 # rebuild headers for retry
