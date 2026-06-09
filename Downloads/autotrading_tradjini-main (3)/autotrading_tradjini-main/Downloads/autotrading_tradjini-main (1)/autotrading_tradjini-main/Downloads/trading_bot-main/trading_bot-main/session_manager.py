@@ -24,6 +24,11 @@ _rate_lock = threading.Lock()
 
 LOGIN_COOLDOWN_SECONDS = 60
 
+# ── In-memory session cache ─────────────────────────────────
+SESSION_CACHE: dict[str, dict] = {}
+SESSION_CACHE_TTL = 300  # 5 minutes
+_session_cache_lock = threading.Lock()
+
 
 def _mask(value: str) -> str:
     if not value or len(value) < 9:
@@ -83,6 +88,15 @@ def create_user_session(
         else:
             supabase.table("broker_sessions").insert(data).execute()
 
+        # Populate in-memory cache
+        with _session_cache_lock:
+            SESSION_CACHE[user_id] = {
+                "api_key":       api_key,
+                "access_token":  access_token,
+                "client_id":     client_id,
+                "_cached_at":    time.time(),
+            }
+
         logging.info(
             f"[SESSION] Session created/updated | User: {user_id} | Client: {client_id} | Session Status: Active"
         )
@@ -93,25 +107,53 @@ def create_user_session(
 
 def get_user_session(user_id: str) -> dict | None:
     """
-    Retrieve the active broker session from Supabase.
+    Retrieve the active broker session — checks SESSION_CACHE first,
+    then falls back to Supabase (with retry).
     Returns {api_key, access_token, client_id} or None.
     """
+    now = time.time()
+
+    # ── Check in-memory cache ─────────────────────────────────
+    with _session_cache_lock:
+        cached = SESSION_CACHE.get(user_id)
+        if cached is not None:
+            age = now - cached.get("_cached_at", 0)
+            if age < SESSION_CACHE_TTL:
+                logging.info(f"[CACHE HIT] Session for user {user_id} (age={age:.0f}s)")
+                return {
+                    "api_key":       cached["api_key"],
+                    "access_token":  cached["access_token"],
+                    "client_id":     cached.get("client_id", ""),
+                }
+            else:
+                logging.info(f"[CACHE EXPIRED] Session for user {user_id} (age={age:.0f}s)")
+
+    # ── Fallback to Supabase with retry ────────────────────────
+    from supabase_client import supabase_retry
     try:
-        res = (
-            supabase.table("broker_sessions")
+        res = supabase_retry(
+            lambda: supabase.table("broker_sessions")
             .select("api_key, access_token, client_id")
             .eq("user_id", user_id)
             .eq("is_active", True)
             .execute()
         )
-        if res.data:
+        if res and res.data:
             session = res.data[0]
             if session.get("api_key") and session.get("access_token"):
-                logging.info(f"[SESSION] Session loaded successfully | User: {user_id} | Client: {session.get('client_id')}")
+                # Populate cache
+                with _session_cache_lock:
+                    SESSION_CACHE[user_id] = {
+                        "api_key":       session["api_key"],
+                        "access_token":  session["access_token"],
+                        "client_id":     session.get("client_id", ""),
+                        "_cached_at":    now,
+                    }
+                logging.info(f"[CACHE MISS] Session loaded from Supabase for user {user_id}")
                 return {
-                    "api_key": session["api_key"],
-                    "access_token": session["access_token"],
-                    "client_id": session.get("client_id", ""),
+                    "api_key":       session["api_key"],
+                    "access_token":  session["access_token"],
+                    "client_id":     session.get("client_id", ""),
                 }
             else:
                 logging.warning(f"[SESSION] Incomplete session for User: {user_id}")
@@ -125,11 +167,14 @@ def invalidate_user_session(user_id: str, reason: str = "MANUAL") -> None:
     """Mark a user's broker session as inactive."""
     try:
         supabase.table("broker_sessions").update({"is_active": False}).eq("user_id", user_id).execute()
-        with _lock:
-            local_runtime_state.pop(user_id, None)
-        logging.info(f"[SESSION] Session invalidated | User: {user_id} | Reason: {reason}")
     except Exception as exc:
-        logging.error(f"[SESSION_MANAGER] Failed to invalidate session for {user_id}: {exc}")
+        logging.error(f"[SESSION_MANAGER] Failed to invalidate session in Supabase for {user_id}: {exc}")
+    # Always clear cache regardless of DB success
+    with _session_cache_lock:
+        SESSION_CACHE.pop(user_id, None)
+    with _lock:
+        local_runtime_state.pop(user_id, None)
+    logging.info(f"[SESSION] Session invalidated | User: {user_id} | Reason: {reason}")
 
 
 def delete_user_session(user_id: str) -> None:
@@ -254,6 +299,10 @@ def attempt_broker_auto_login(user_id: str) -> bool:
             _disable_trading(user_id)
             return False
             
+        # Invalidate stale cache entry
+        with _session_cache_lock:
+            SESSION_CACHE.pop(user_id, None)
+
         # Save session
         normalized_client_id = client_id.strip().upper()
         create_user_session(user_id, api_key.strip(), normalized_client_id, token)

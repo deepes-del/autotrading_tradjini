@@ -369,8 +369,11 @@ def test_broker_login(req: TestBrokerLoginRequest):
 # ──────────────────────────────────────────────────────────────
 
 def update_bot_status(user_id: str, is_running: bool):
+    from supabase_client import supabase_retry
     try:
-        supabase.table("users").update({"bot_running": is_running}).eq("user_id", user_id).execute()
+        supabase_retry(
+            lambda: supabase.table("users").update({"bot_running": is_running}).eq("user_id", user_id).execute()
+        )
     except Exception as e:
         logging.error(f"Error updating bot status: {e}")
 
@@ -385,9 +388,12 @@ def bot_status(session_token: str):
     session = get_user_session(user_id)
 
     # 3. Fetch bot_running state
-    res = supabase.table("users").select("bot_running").eq("user_id", user_id).execute()
+    from supabase_client import supabase_retry
+    res = supabase_retry(
+        lambda: supabase.table("users").select("bot_running").eq("user_id", user_id).execute()
+    )
     bot_running = False
-    if res.data:
+    if res and res.data:
         bot_running = res.data[0].get("bot_running", False)
 
     if session:
@@ -537,36 +543,43 @@ def admin_login(req: AdminLoginReq):
 
 @app.get("/admin/dashboard")
 def admin_dashboard(admin_token: str):
+    from supabase_client import supabase_retry
     admin_id = validate_app_session(admin_token)
     if not admin_id or not admin_id.startswith("admin:"):
         return {"error": "Unauthorized"}
     try:
         # 1. Fetch users
-        users_res = supabase.table("users").select("user_id, name, phone, status, bot_running, created_at").execute()
-        
+        users_res = supabase_retry(
+            lambda: supabase.table("users").select("user_id, name, phone, status, bot_running, created_at").execute()
+        )
+
         # 2. Fetch broker configs status
-        configs_res = supabase.table("broker_configs").select("user_id, updated_at").execute()
-        configs_map = {c["user_id"]: c["updated_at"] for c in configs_res.data}
-        
+        configs_res = supabase_retry(
+            lambda: supabase.table("broker_configs").select("user_id, updated_at").execute()
+        )
+        configs_map = {c["user_id"]: c["updated_at"] for c in configs_res.data} if configs_res and configs_res.data else {}
+
         # 3. Fetch broker sessions status
-        sessions_res = supabase.table("broker_sessions").select("user_id, client_id, is_active, token_created_at").execute()
-        sessions_map = {s["user_id"]: s for s in sessions_res.data}
-        
+        sessions_res = supabase_retry(
+            lambda: supabase.table("broker_sessions").select("user_id, client_id, is_active, token_created_at").execute()
+        )
+        sessions_map = {s["user_id"]: s for s in sessions_res.data} if sessions_res and sessions_res.data else {}
+
         # 4. Fetch active bot info from main memory
         from main import running_bots
-        
+
         # 5. Combine
         results = []
-        for u in users_res.data:
+        for u in (users_res.data if users_res and users_res.data else []):
             u_id = u["user_id"]
             u["broker_configured"] = u_id in configs_map
             u["broker_updated_at"] = configs_map.get(u_id)
-            
+
             session_info = sessions_map.get(u_id, {})
             u["broker_client_id"] = session_info.get("client_id")
             u["session_active"] = session_info.get("is_active", False)
             u["token_created_at"] = session_info.get("token_created_at")
-            
+
             # Add active bot info
             if u_id in running_bots:
                 cfg = running_bots[u_id].get("config", {})
@@ -575,20 +588,23 @@ def admin_dashboard(admin_token: str):
                 u["active_sl"] = cfg.get("sl")
                 u["active_target"] = cfg.get("target")
                 u["active_index"] = cfg.get("index")
-            
+
             results.append(u)
-            
+
         return {"users": results}
     except Exception as e:
         return {"error": str(e)}
 
 @app.post("/admin/approve")
 def admin_approve(req: AdminActionReq):
+    from supabase_client import supabase_retry
     admin_id = validate_app_session(req.admin_token)
     if not admin_id or not admin_id.startswith("admin:"):
         return {"error": "Unauthorized"}
     try:
-        supabase.table("users").update({"status": "approved"}).eq("user_id", req.user_id).execute()
+        supabase_retry(
+            lambda: supabase.table("users").update({"status": "approved"}).eq("user_id", req.user_id).execute()
+        )
         return {"status": f"User {req.user_id} approved"}
     except Exception as e:
         return {"error": str(e)}
@@ -630,19 +646,24 @@ def _stop_user_bot(user_id: str) -> bool:
     Returns True if a running bot was found and signalled.
     Thread-safe: only sets a flag; the thread exits on its own loop iteration.
     """
+    from supabase_client import supabase_retry
     from main import running_bots
     bot = running_bots.get(user_id)
     if bot:
         bot["config"]["stop_requested"] = True
         try:
-            supabase.table("users").update({"bot_running": False}).eq("user_id", user_id).execute()
+            supabase_retry(
+                lambda: supabase.table("users").update({"bot_running": False}).eq("user_id", user_id).execute()
+            )
         except Exception as e:
             logging.error(f"[ADMIN] Supabase update failed on stop-bot for {user_id}: {e}")
         logging.info(f"[ADMIN] Stop signal sent to bot for user {user_id}")
         return True
     # Bot not running — still ensure DB is consistent
     try:
-        supabase.table("users").update({"bot_running": False}).eq("user_id", user_id).execute()
+        supabase_retry(
+            lambda: supabase.table("users").update({"bot_running": False}).eq("user_id", user_id).execute()
+        )
     except Exception:
         pass
     return False
@@ -670,6 +691,7 @@ def admin_stop_bot(req: AdminActionReq):
 @app.post("/admin/disapprove-user")
 def admin_disapprove_user(req: AdminActionReq):
     """Block a user: stop their bot and set status='blocked' in Supabase."""
+    from supabase_client import supabase_retry
     admin_id = validate_app_session(req.admin_token)
     if not admin_id or not admin_id.startswith("admin:"):
         return {"error": "Unauthorized"}
@@ -679,9 +701,11 @@ def admin_disapprove_user(req: AdminActionReq):
 
     # 2. Update Supabase
     try:
-        supabase.table("users").update(
-            {"status": "blocked", "bot_running": False}
-        ).eq("user_id", req.user_id).execute()
+        supabase_retry(
+            lambda: supabase.table("users").update(
+                {"status": "blocked", "bot_running": False}
+            ).eq("user_id", req.user_id).execute()
+        )
         logging.info(f"[ADMIN] User {req.user_id} blocked.")
         return {"status": f"User {req.user_id} blocked", "bot": "stopped"}
     except Exception as e:
@@ -691,6 +715,7 @@ def admin_disapprove_user(req: AdminActionReq):
 @app.delete("/admin/delete-user")
 def admin_delete_user(req: AdminActionReq):
     """Permanently delete a user: stop their bot and remove from Supabase."""
+    from supabase_client import supabase_retry
     admin_id = validate_app_session(req.admin_token)
     if not admin_id or not admin_id.startswith("admin:"):
         return {"error": "Unauthorized"}
@@ -700,7 +725,9 @@ def admin_delete_user(req: AdminActionReq):
 
     # 2. Delete from Supabase
     try:
-        supabase.table("users").delete().eq("user_id", req.user_id).execute()
+        supabase_retry(
+            lambda: supabase.table("users").delete().eq("user_id", req.user_id).execute()
+        )
         logging.info(f"[ADMIN] User {req.user_id} deleted.")
         return {"status": f"User {req.user_id} deleted successfully"}
     except Exception as e:
@@ -722,25 +749,28 @@ def admin_user_errors(
     Optional query params: limit (default 100) and offset (default 0)
     for cursor-style pagination.
     """
+    from supabase_client import supabase_retry
     admin_id = validate_app_session(admin_token)
     if not admin_id or not admin_id.startswith("admin:"):
         return {"error": "Unauthorized"}
 
     try:
-        res = (
-            supabase.table("user_errors")
-            .select("id, error_type, error_message, severity, raw_response, created_at")
-            .eq("user_id", user_id)
-            .order("created_at", desc=True)
-            .range(offset, offset + limit - 1)
-            .execute()
+        res = supabase_retry(
+            lambda: (
+                supabase.table("user_errors")
+                .select("id, error_type, error_message, severity, raw_response, created_at")
+                .eq("user_id", user_id)
+                .order("created_at", desc=True)
+                .range(offset, offset + limit - 1)
+                .execute()
+            )
         )
         return {
             "user_id": user_id,
-            "total":   len(res.data),
+            "total":   len(res.data) if res and res.data else 0,
             "offset":  offset,
             "limit":   limit,
-            "errors":  res.data,
+            "errors":  res.data if res and res.data else [],
         }
     except Exception as e:
         logging.error(f"[ADMIN] user-errors fetch failed for {user_id}: {e}")
@@ -874,16 +904,32 @@ def validate_active_sessions_startup():
     """
     Validate session integrity for all users who have bot_running = True.
     """
+    from supabase_client import supabase_retry
     logging.info("[SESSION VALIDATION] Checking active bot user sessions...")
     try:
-        users_res = supabase.table("users").select("user_id").eq("bot_running", True).execute()
-        if users_res.data:
+        users_res = supabase_retry(
+            lambda: supabase.table("users").select("user_id").eq("bot_running", True).execute()
+        )
+        if users_res and users_res.data:
             for u in users_res.data:
                 uid = u["user_id"]
-                sess_res = supabase.table("broker_sessions").select("api_key, access_token, client_id, is_active").eq("user_id", uid).execute()
-                if not sess_res.data:
+                try:
+                    sess_res = supabase_retry(
+                        lambda uid=uid: supabase.table("broker_sessions")
+                        .select("api_key, access_token, client_id, is_active")
+                        .eq("user_id", uid)
+                        .execute()
+                    )
+                except Exception:
+                    sess_res = None
+                if not sess_res or not sess_res.data:
                     logging.warning(f"[SESSION INVALID]\nuser={uid}\nreason=missing_broker_session_record")
-                    supabase.table("users").update({"bot_running": False}).eq("user_id", uid).execute()
+                    try:
+                        supabase_retry(
+                            lambda: supabase.table("users").update({"bot_running": False}).eq("user_id", uid).execute()
+                        )
+                    except Exception:
+                        pass
                     continue
                 sess = sess_res.data[0]
                 reasons = []
@@ -899,7 +945,12 @@ def validate_active_sessions_startup():
                 if reasons:
                     reason_str = ",".join(reasons)
                     logging.warning(f"[SESSION INVALID]\nuser={uid}\nreason={reason_str}")
-                    supabase.table("users").update({"bot_running": False}).eq("user_id", uid).execute()
+                    try:
+                        supabase_retry(
+                            lambda: supabase.table("users").update({"bot_running": False}).eq("user_id", uid).execute()
+                        )
+                    except Exception:
+                        pass
                 else:
                     logging.info(f"[SESSION VALID]\nuser={uid}")
         else:
@@ -914,7 +965,7 @@ def startup_event():
     validate_active_sessions_startup()
 
     logging.info("[STARTUP] Checking instrument master data...")
-    from order_manager import validate_instrument_master, refresh_instrument_master
+    from order_manager import validate_instrument_master, refresh_instrument_master, load_instrument_cache
     
     # 1. Validate what we have in Supabase
     status = validate_instrument_master()
@@ -922,11 +973,14 @@ def startup_event():
         logging.warning(f"[STARTUP] Instrument validation failed ({status.get('reason')}). Attempting immediate refresh...")
         success = refresh_instrument_master(force=True)
         if success:
-            logging.info("[STARTUP] Immediate refresh successful.")
+            logging.info("[STARTUP] Immediate refresh successful — cache populated by refresh.")
         else:
             logging.error("[STARTUP] Immediate refresh failed. Bot may not have instruments.")
+            # Attempt to load stale cache anyway
+            load_instrument_cache()
     else:
-        logging.info("[STARTUP] Instrument data looks good.")
+        logging.info("[STARTUP] Instrument data looks good. Loading into memory cache...")
+        load_instrument_cache()
 
     # 2. Start the daily scheduler thread
     scheduler_thread = threading.Thread(target=_daily_instrument_scheduler, daemon=True)

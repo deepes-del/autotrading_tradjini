@@ -31,6 +31,14 @@ MIN_BANKNIFTY_RECORDS  = 50    # minimum valid BANKNIFTY contracts expected
 INSERT_BATCH_SIZE      = 500   # rows per Supabase batch insert
 IST                    = pytz.timezone("Asia/Kolkata")
 
+# ── In-memory instrument cache (loaded once at startup, refreshed daily) ──────
+GLOBAL_INSTRUMENT_CACHE = {
+    "data":       None,   # list[dict] of all NIFTY/BANKNIFTY option records
+    "loaded_at":  None,   # datetime.datetime when cache was populated
+    "lock":       threading.Lock(),
+    "initialized": False, # True after first successful load
+}
+
 # ─────────────────────────────────────────────────────────────
 # Private: find any active broker session
 # ─────────────────────────────────────────────────────────────
@@ -146,7 +154,10 @@ def refresh_instrument_master(force: bool = False) -> bool:
 
         logging.info(f"[INFO] Inserted {inserted} records into Supabase")
 
-        # 7. Mark as done for today
+        # 7. Populate in-memory cache
+        _reload_instrument_cache_from_db()
+
+        # 8. Mark as done for today
         with _INSTRUMENT_STATE["refresh_lock"]:
             _INSTRUMENT_STATE["last_refresh_date"] = today
 
@@ -265,6 +276,35 @@ def _batch_insert_instruments(supabase, records: list[dict], retries: int = 3) -
 
 
 # ─────────────────────────────────────────────────────────────
+# In-memory cache loader
+# ─────────────────────────────────────────────────────────────
+
+def _reload_instrument_cache_from_db():
+    """Load all NIFTY/BANKNIFTY option records from Supabase into GLOBAL_INSTRUMENT_CACHE."""
+    from supabase_client import supabase, supabase_retry
+    try:
+        res = supabase_retry(
+            lambda: supabase.table("instrument_master")
+            .select("sym_id, trad_symbol, symbol, strike, expiry, option_type, lot_size, updated_date")
+            .in_("symbol", ["NIFTY", "BANKNIFTY"])
+            .execute()
+        )
+        records = res.data if res and res.data else []
+        with GLOBAL_INSTRUMENT_CACHE["lock"]:
+            GLOBAL_INSTRUMENT_CACHE["data"] = records
+            GLOBAL_INSTRUMENT_CACHE["loaded_at"] = datetime.datetime.now(IST)
+            GLOBAL_INSTRUMENT_CACHE["initialized"] = True
+        logging.info(f"[CACHE] Instrument cache loaded: {len(records)} records")
+    except Exception as exc:
+        logging.error(f"[CACHE] Failed to load instrument cache: {exc}")
+
+
+def load_instrument_cache():
+    """Public entry point — called at app startup.  Loads from Supabase into memory."""
+    _reload_instrument_cache_from_db()
+
+
+# ─────────────────────────────────────────────────────────────
 # Public: validate_instrument_master
 # ─────────────────────────────────────────────────────────────
 
@@ -356,68 +396,120 @@ def select_atm_option(
     option_type: str = "PE",
 ) -> tuple:
     """
-    Find the nearest-expiry ATM option from Supabase instrument_master.
+    Find the nearest-expiry ATM option from GLOBAL_INSTRUMENT_CACHE.
 
     Returns (sym_id, trad_symbol, ltp) or (None, None, None).
-    Never triggers an instrument download.
+    NEVER queries Supabase during trade execution.
+    Falls back to Supabase only if cache is empty (with retry).
     """
-    today    = datetime.datetime.now(IST).date().isoformat()
-    step     = 50 if index_name.upper() == "NIFTY" else 100
+    today      = datetime.datetime.now(IST).date().isoformat()
+    step       = 50 if index_name.upper() == "NIFTY" else 100
     atm_strike = round(index_ltp / step) * step
-    opt_type = option_type.upper().strip()
+    opt_type   = option_type.upper().strip()
 
     logging.info(
         f"[ATM LOOKUP] index={index_name} ltp={index_ltp:.2f} "
         f"atm_strike={atm_strike} opt_type={opt_type}"
     )
 
+    # ── Try in-memory cache first ───────────────────────────────
+    records = None
     try:
-        from supabase_client import supabase
+        with GLOBAL_INSTRUMENT_CACHE["lock"]:
+            if GLOBAL_INSTRUMENT_CACHE["initialized"] and GLOBAL_INSTRUMENT_CACHE["data"] is not None:
+                records = GLOBAL_INSTRUMENT_CACHE["data"]
+    except Exception:
+        pass
 
-        # Step 1: Find the nearest available expiry
-        expiry_res = (
-            supabase.table("instrument_master")
-            .select("expiry")
-            .eq("symbol", index_name.upper())
-            .eq("option_type", opt_type)
-            .eq("updated_date", today)
-            .gte("expiry", today)
-            .order("expiry", desc=False)
-            .limit(1)
-            .execute()
-        )
+    if records is None:
+        logging.warning("[CACHE MISS] GLOBAL_INSTRUMENT_CACHE is empty — falling back to Supabase")
+        today_iso = today
+        try:
+            from supabase_client import supabase, supabase_retry
+            res = supabase_retry(
+                lambda: supabase.table("instrument_master")
+                .select("sym_id, trad_symbol, symbol, strike, expiry, option_type, lot_size, updated_date")
+                .in_("symbol", ["NIFTY", "BANKNIFTY"])
+                .execute()
+            )
+            if res and res.data:
+                records = res.data
+        except Exception as exc:
+            logging.error(f"[CACHE FAIL] Supabase fallback also failed: {exc}")
+            return None, None, None
+    else:
+        logging.info("[CACHE HIT] Using GLOBAL_INSTRUMENT_CACHE for ATM lookup")
 
-        if not expiry_res.data:
+    if not records:
+        logging.error("[ATM FAILURE] Reason: No instruments available (cache empty)")
+        return None, None, None
+
+    # ── Filter in Python ────────────────────────────────────────
+    try:
+        # Step 1: Filter by symbol + option_type + future expiry
+        symbol_index = index_name.upper()
+        filtered = [
+            r for r in records
+            if r.get("symbol") == symbol_index
+            and r.get("option_type") == opt_type
+            and str(r.get("expiry", "")) >= today
+        ]
+
+        if not filtered:
+            cache_age = _INSTRUMENT_STATE.get("last_refresh_date", "never")
             logging.error(
-                f"[ERROR] No ATM token found — no expiry rows for "
-                f"{index_name} {opt_type} (updated_date={today})"
+                f"[ATM FAILURE]\n\n"
+                f"Reason:\n"
+                f"No instruments after index filter\n\n"
+                f"Details: index={symbol_index} opt_type={opt_type} "
+                f"today={today}  total_in_cache={len(records)}  "
+                f"last_refresh={cache_age}"
             )
             return None, None, None
 
-        nearest_expiry = expiry_res.data[0]["expiry"]
-        logging.info(f"[ATM LOOKUP] Nearest expiry: {nearest_expiry}")
+        # Step 2: Find nearest expiry
+        unique_expiries = sorted(set(r["expiry"] for r in filtered if r.get("expiry")))
+        if not unique_expiries:
+            logging.error("[ATM FAILURE] Reason: No valid expiry dates in filtered records")
+            return None, None, None
+        nearest_expiry = unique_expiries[0]
 
-        # Step 2: Fetch all strikes for that expiry
-        strikes_res = (
-            supabase.table("instrument_master")
-            .select("sym_id, trad_symbol, strike, expiry, lot_size")
-            .eq("symbol", index_name.upper())
-            .eq("option_type", opt_type)
-            .eq("expiry", nearest_expiry)
-            .eq("updated_date", today)
-            .execute()
-        )
-
-        if not strikes_res.data:
+        # Step 3: Filter by that expiry
+        expiry_filtered = [r for r in filtered if r["expiry"] == nearest_expiry]
+        if not expiry_filtered:
             logging.error(
-                f"[ERROR] No ATM token found — no strikes found for "
-                f"{index_name} {opt_type} expiry={nearest_expiry}"
+                f"[ATM FAILURE]\n\n"
+                f"Reason:\n"
+                f"No instruments after expiry filter\n\n"
+                f"Details: index={symbol_index} opt_type={opt_type} "
+                f"expiry={nearest_expiry}"
             )
             return None, None, None
 
-        # Step 3: Pick the strike closest to ATM
+        filtered_count = len(expiry_filtered)
+        first_10 = expiry_filtered[:10]
+        first_10_str = "\n".join(
+            f"  strike={r.get('strike')} sym={r.get('trad_symbol')} "
+            f"tok={r.get('sym_id')}"
+            for r in first_10
+        )
+
+        logging.info(
+            f"[ATM DEBUG]\n\n"
+            f"User: {user_id}\n"
+            f"Index: {symbol_index}\n"
+            f"Index LTP: {index_ltp:.2f}\n"
+            f"Calculated ATM Strike: {atm_strike}\n"
+            f"Option Type: {opt_type}\n"
+            f"Selected Expiry: {nearest_expiry}\n\n"
+            f"Total Instrument Count: {len(records)}\n"
+            f"Filtered Instrument Count: {filtered_count}\n\n"
+            f"First 10 Filtered Instruments:\n{first_10_str}"
+        )
+
+        # Step 4: Pick strike closest to ATM
         best = min(
-            strikes_res.data,
+            expiry_filtered,
             key=lambda r: abs(float(r["strike"]) - float(atm_strike))
         )
 
@@ -432,19 +524,20 @@ def select_atm_option(
             f"expiry={best['expiry']}"
         )
 
-        # Step 4: Fetch live LTP (only network call at trade time)
+        # Step 5: Fetch live LTP (only network call at trade time)
         import data_fetcher
         option_ltp = data_fetcher.get_ltp(user_id, "NFO", best_symbol, best_token)
         if option_ltp is None:
             logging.error(
-                f"[ERROR] LTP fetch failed for "
-                f"token={best_token} sym={best_symbol}"
+                f"[ATM FAILURE]\n\n"
+                f"Reason:\n"
+                f"LTP fetch failed\n\n"
+                f"Details: LTP fetch failed — token={best_token} "
+                f"sym={best_symbol} (check broker session)"
             )
             return best_token, best_symbol, None
 
-        logging.info(
-            f"[ATM FOUND] sym={best_symbol} tok={best_token} ltp={option_ltp}"
-        )
+        logging.info(f"[ATM FOUND] sym={best_symbol} tok={best_token} ltp={option_ltp}")
         return best_token, best_symbol, float(option_ltp)
 
     except Exception as exc:

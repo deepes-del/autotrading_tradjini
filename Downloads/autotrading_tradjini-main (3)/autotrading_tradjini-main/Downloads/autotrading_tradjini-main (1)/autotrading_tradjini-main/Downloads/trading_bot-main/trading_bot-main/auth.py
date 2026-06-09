@@ -1,8 +1,15 @@
 import re
 import secrets
+import time
+import threading
 import logging
 from datetime import datetime, timedelta, timezone
 from supabase_client import supabase
+
+# ── App session cache ───────────────────────────────────────
+_APP_SESSION_CACHE: dict[str, dict] = {}
+_APP_SESSION_CACHE_TTL = 60  # 1 minute
+_app_session_cache_lock = threading.Lock()
 
 
 def generate_user_id(name: str, phone: str) -> str:
@@ -25,16 +32,19 @@ def create_app_session(user_id: str, days_valid: int = 30) -> str | None:
     """
     Generate a secure session token and store it in Supabase.
     """
+    from supabase_client import supabase_retry
     try:
         session_token = secrets.token_hex(32)
         expires_at = (datetime.now() + timedelta(days=days_valid)).isoformat()
         
-        supabase.table("app_sessions").insert({
-            "session_token": session_token,
-            "user_id": user_id,
-            "expires_at": expires_at,
-            "is_active": True
-        }).execute()
+        supabase_retry(
+            lambda: supabase.table("app_sessions").insert({
+                "session_token": session_token,
+                "user_id": user_id,
+                "expires_at": expires_at,
+                "is_active": True
+            }).execute()
+        )
         
         logging.info(f"[SESSION] Created persistent session for {user_id}")
         return session_token
@@ -46,26 +56,56 @@ def create_app_session(user_id: str, days_valid: int = 30) -> str | None:
 def validate_app_session(session_token: str) -> str | None:
     """
     Check if a session_token is valid and return the associated user_id.
+    Uses in-memory cache with 60s TTL + retry on connection errors.
     """
     if not session_token:
         return None
-        
+
+    now = time.time()
+    cache_key = f"app_session:{session_token}"
+
+    # ── Check cache ──────────────────────────────────────────
+    with _app_session_cache_lock:
+        cached = _APP_SESSION_CACHE.get(cache_key)
+        if cached is not None:
+            age = now - cached.get("_cached_at", 0)
+            if age < _APP_SESSION_CACHE_TTL:
+                logging.info("[CACHE HIT] App session validated from cache")
+                return cached.get("user_id")
+
+    # ── Query Supabase with retry ─────────────────────────────
+    from supabase_client import supabase_retry
     try:
-        res = supabase.table("app_sessions").select("user_id, expires_at, is_active").eq("session_token", session_token).eq("is_active", True).execute()
-        
-        if not res.data:
+        res = supabase_retry(
+            lambda: supabase.table("app_sessions")
+            .select("user_id, expires_at, is_active")
+            .eq("session_token", session_token)
+            .eq("is_active", True)
+            .execute()
+        )
+
+        if not res or not res.data:
+            # Cache negative result briefly to avoid hammering DB
+            with _app_session_cache_lock:
+                _APP_SESSION_CACHE[cache_key] = {"user_id": None, "_cached_at": now}
             return None
-            
+
         session = res.data[0]
-        
+
         # Check expiry
         if session.get("expires_at"):
             expiry = datetime.fromisoformat(session["expires_at"].replace('Z', '+00:00'))
             if datetime.now().astimezone() > expiry.astimezone():
                 logging.warning(f"[AUTH] Session expired for token ending in ...{session_token[-4:]}")
+                with _app_session_cache_lock:
+                    _APP_SESSION_CACHE[cache_key] = {"user_id": None, "_cached_at": now}
                 return None
-                
-        return session["user_id"]
+
+        user_id = session["user_id"]
+        with _app_session_cache_lock:
+            _APP_SESSION_CACHE[cache_key] = {"user_id": user_id, "_cached_at": now}
+        logging.info("[CACHE MISS] App session validated from Supabase")
+        return user_id
     except Exception as e:
         logging.error(f"[AUTH] Session validation error: {e}")
         return None
@@ -75,8 +115,13 @@ def deactivate_app_session(session_token: str):
     """
     Mark a session as inactive (Logout).
     """
+    from supabase_client import supabase_retry
     try:
-        supabase.table("app_sessions").update({"is_active": False}).eq("session_token", session_token).execute()
+        supabase_retry(
+            lambda: supabase.table("app_sessions").update({"is_active": False}).eq("session_token", session_token).execute()
+        )
+        with _app_session_cache_lock:
+            _APP_SESSION_CACHE.pop(f"app_session:{session_token}", None)
         logging.info(f"[SESSION] Deactivated token ending in ...{session_token[-4:]}")
     except Exception as e:
         logging.error(f"[AUTH] Deactivation error: {e}")

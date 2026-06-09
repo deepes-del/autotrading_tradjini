@@ -55,15 +55,18 @@ def log_error(
 
     # ── 1. Persist to Supabase ───────────────────────────────
     try:
-        supabase.table("user_errors").insert(
-            {
-                "user_id":       user_id,
-                "error_type":    error_type,
-                "error_message": message,
-                "severity":      severity,
-                "raw_response":  safe_raw,
-            }
-        ).execute()
+        from supabase_client import supabase_retry
+        supabase_retry(
+            lambda: supabase.table("user_errors").insert(
+                {
+                    "user_id":       user_id,
+                    "error_type":    error_type,
+                    "error_message": message,
+                    "severity":      severity,
+                    "raw_response":  safe_raw,
+                }
+            ).execute()
+        )
     except Exception as db_exc:
         # Non-fatal: log to console and continue
         logger.error(

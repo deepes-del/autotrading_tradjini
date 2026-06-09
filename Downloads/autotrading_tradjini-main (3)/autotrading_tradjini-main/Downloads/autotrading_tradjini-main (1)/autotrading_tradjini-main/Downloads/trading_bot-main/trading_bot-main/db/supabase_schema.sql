@@ -102,5 +102,41 @@ CREATE TABLE IF NOT EXISTS broker_configs (
 
 CREATE INDEX IF NOT EXISTS idx_broker_configs_user_id ON broker_configs (user_id);
 
+-- 9. INSTRUMENT MASTER TABLE (NFO option contracts — refreshed daily)
+CREATE TABLE IF NOT EXISTS instrument_master (
+    id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    sym_id       text        NOT NULL,
+    trad_symbol  text        NOT NULL,
+    symbol       text        NOT NULL,          -- NIFTY or BANKNIFTY
+    strike       numeric(12, 2) NOT NULL,
+    expiry       date        NOT NULL,
+    option_type  text        NOT NULL,          -- CE or PE
+    lot_size     integer     NOT NULL DEFAULT 0,
+    updated_date date        NOT NULL,
+    UNIQUE(sym_id, updated_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_instrument_master_lookup
+    ON instrument_master (symbol, option_type, expiry, updated_date);
+
+CREATE INDEX IF NOT EXISTS idx_instrument_master_strike
+    ON instrument_master (symbol, option_type, strike, expiry);
+
+-- 10. BOT CONFIGS TABLE (per-user, per-index strategy settings)
+CREATE TABLE IF NOT EXISTS bot_configs (
+    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         text        NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    index_name      text        NOT NULL,        -- NIFTY or BANKNIFTY
+    strategy_name   text        NOT NULL DEFAULT 'strategy_one',
+    mode            text        NOT NULL DEFAULT 'default',
+    sl_points       integer     NOT NULL DEFAULT 25,
+    target_points   integer     NOT NULL DEFAULT 50,
+    lots            integer     NOT NULL DEFAULT 1,
+    updated_at      timestamptz NOT NULL DEFAULT now(),
+    UNIQUE(user_id, index_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bot_configs_user_id ON bot_configs (user_id);
+
 -- Default Admin
 INSERT INTO admin (username, password) VALUES ('admin', 'admin123') ON CONFLICT DO NOTHING;

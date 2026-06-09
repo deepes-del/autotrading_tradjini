@@ -77,18 +77,20 @@ def store_strategy_trade(
     Returns the generated strategy_trade_id or None on failure.
     """
     try:
-        from supabase_client import supabase
-        res = supabase.table("strategy_trades").insert({
-            "user_id":     user_id,
-            "symbol":      symbol,
-            "side":        side,
-            "qty":         qty,
-            "entry_price": round(float(entry_price), 2),
-            "sl":          round(float(sl), 2),
-            "target":      round(float(target), 2),
-        }).execute()
+        from supabase_client import supabase, supabase_retry
+        res = supabase_retry(
+            lambda: supabase.table("strategy_trades").insert({
+                "user_id":     user_id,
+                "symbol":      symbol,
+                "side":        side,
+                "qty":         qty,
+                "entry_price": round(float(entry_price), 2),
+                "sl":          round(float(sl), 2),
+                "target":      round(float(target), 2),
+            }).execute()
+        )
         logging.info(f"[STRATEGY STORED] user={user_id} sym={symbol}")
-        if res.data and len(res.data) > 0:
+        if res and res.data and len(res.data) > 0:
             return res.data[0]["id"]
     except Exception as exc:
         logging.error(f"[STRATEGY STORE FAIL] user={user_id}: {exc}")
@@ -112,19 +114,21 @@ def store_broker_trade(
     Called ONLY after place_buy_order() returns success AND order status is COMPLETE.
     """
     try:
-        from supabase_client import supabase
-        supabase.table("broker_trades").insert({
-            "user_id":           user_id,
-            "strategy_trade_id": strategy_trade_id,
-            "symbol":            symbol,
-            "side":              side,
-            "qty":               qty,
-            "executed_price":    round(float(executed_price), 2),
-            "sl":                round(float(sl), 2),
-            "target":            round(float(target), 2),
-            "status":            "OPEN",
-            "broker_order_id":   broker_order_id,
-        }).execute()
+        from supabase_client import supabase, supabase_retry
+        supabase_retry(
+            lambda: supabase.table("broker_trades").insert({
+                "user_id":           user_id,
+                "strategy_trade_id": strategy_trade_id,
+                "symbol":            symbol,
+                "side":              side,
+                "qty":               qty,
+                "executed_price":    round(float(executed_price), 2),
+                "sl":                round(float(sl), 2),
+                "target":            round(float(target), 2),
+                "status":            "OPEN",
+                "broker_order_id":   broker_order_id,
+            }).execute()
+        )
         logging.info(f"[BROKER TRADE STORED] user={user_id} sym={symbol} order={broker_order_id}")
     except Exception as exc:
         logging.error(f"[BROKER TRADE STORE FAIL] user={user_id}: {exc}")
@@ -140,12 +144,14 @@ def close_broker_trade(
     Mark a trade CLOSED in Supabase with the exit price and timestamp.
     """
     try:
-        from supabase_client import supabase
-        supabase.table("broker_trades").update({
-            "exit_price": round(float(exit_price), 2),
-            "status":     "CLOSED",
-            "closed_at":  datetime.datetime.utcnow().isoformat(),
-        }).eq("user_id", user_id).eq("status", "OPEN").execute()
+        from supabase_client import supabase, supabase_retry
+        supabase_retry(
+            lambda: supabase.table("broker_trades").update({
+                "exit_price": round(float(exit_price), 2),
+                "status":     "CLOSED",
+                "closed_at":  datetime.datetime.utcnow().isoformat(),
+            }).eq("user_id", user_id).eq("status", "OPEN").execute()
+        )
         logging.info(
             f"[BROKER TRADE CLOSED] user={user_id} "
             f"exit={exit_price} reason={reason}"
@@ -196,8 +202,10 @@ def _run_bot_wrapper(user_config: dict) -> None:
         with bot_lock:
             running_bots.pop(user_id, None)
         try:
-            from supabase_client import supabase
-            supabase.table("users").update({"bot_running": False}).eq("user_id", user_id).execute()
+            from supabase_client import supabase, supabase_retry
+            supabase_retry(
+                lambda: supabase.table("users").update({"bot_running": False}).eq("user_id", user_id).execute()
+            )
         except Exception as db_e:
             logging.error(f"[BOT] DB update failed on exit: {db_e}")
         print(f"[BOT] Thread exited for user: {user_id}")
@@ -261,6 +269,7 @@ def _run_bot_logic(user_config: dict) -> None:
     last_candle_time     = None
     eod_squared_off      = False   # Prevents duplicate EOD exits
     last_db_check        = 0       # Epoch time of last Supabase safety check
+    cached_user_status   = None    # Cached {"status": str, "bot_running": bool, "cached_at": float}
 
     EOD_SQUAREOFF_TIME = datetime.time(15, 10)  # 3:10 PM IST
 
@@ -272,30 +281,51 @@ def _run_bot_logic(user_config: dict) -> None:
             add_log(user_id, "Bot stopped by user request.")
             break
 
-        # ── Supabase safety check (every 30s) ────────────────────────────
+        # ── Supabase safety check (cached, max once per 30s) ─────────────
         # Admin may have blocked/deleted the user or set bot_running=False.
-        # We poll the DB periodically so the bot self-terminates promptly.
+        # Uses an in-memory cache to avoid live Supabase queries during trading.
         if time.time() - last_db_check > 30:
             last_db_check = time.time()
-            try:
+
+            should_query_live = True
+
+            # Try cache first
+            if cached_user_status is not None:
+                cache_age = time.time() - cached_user_status.get("_cached_at", 0)
+                if cache_age < 30:
+                    should_query_live = False
+                    row = cached_user_status
+                    logging.info("[CACHE HIT] Bot safety status from cache")
+                    if row.get("status") == "blocked":
+                        add_log(user_id, "🚫 Account blocked by admin — bot terminating.")
+                        break
+                    if not row.get("bot_running", True):
+                        add_log(user_id, "⏹️ bot_running=False detected in DB — stopping.")
+                        break
+
+            if should_query_live:
+                logging.info("[CACHE MISS] Querying Supabase for bot safety status")
                 from supabase_client import supabase as _sb
-                db_res = _sb.table("users").select("status, bot_running").eq("user_id", user_id).execute()
-                if not db_res.data:
-                    add_log(user_id, "🚫 User not found in DB — bot terminating.")
-                    logging.warning(f"[BOT SAFETY] User {user_id} missing from DB. Stopping.")
-                    break
-                row = db_res.data[0]
-                if row.get("status") == "blocked":
-                    add_log(user_id, "🚫 Account blocked by admin — bot terminating.")
-                    logging.warning(f"[BOT SAFETY] User {user_id} is blocked. Stopping.")
-                    break
-                if not row.get("bot_running", True):
-                    add_log(user_id, "⏹️ bot_running=False detected in DB — stopping.")
-                    logging.info(f"[BOT SAFETY] bot_running=False for {user_id}. Stopping.")
-                    break
-            except Exception as _db_exc:
-                logging.warning(f"[BOT SAFETY] DB check failed (non-fatal): {_db_exc}")
-                # Non-fatal — bot continues; next iteration will retry
+                from supabase_client import supabase_retry
+                try:
+                    db_res = supabase_retry(
+                        lambda: _sb.table("users").select("status, bot_running").eq("user_id", user_id).execute()
+                    )
+                    if not db_res or not db_res.data:
+                        add_log(user_id, "🚫 User not found in DB — bot terminating.")
+                        logging.warning(f"[BOT SAFETY] User {user_id} missing from DB. Stopping.")
+                        break
+                    row = db_res.data[0]
+                    cached_user_status = {**row, "_cached_at": time.time()}
+                    if row.get("status") == "blocked":
+                        add_log(user_id, "🚫 Account blocked by admin — bot terminating.")
+                        break
+                    if not row.get("bot_running", True):
+                        add_log(user_id, "⏹️ bot_running=False detected in DB — stopping.")
+                        break
+                except Exception as _db_exc:
+                    logging.warning(f"[BOT SAFETY] DB check failed (non-fatal): {_db_exc}")
+                    # Non-fatal — bot continues; next iteration will retry
 
         ist_now      = datetime.datetime.now(config.TIMEZONE)
         market_start = ist_now.replace(hour=9,  minute=15, second=0, microsecond=0)
