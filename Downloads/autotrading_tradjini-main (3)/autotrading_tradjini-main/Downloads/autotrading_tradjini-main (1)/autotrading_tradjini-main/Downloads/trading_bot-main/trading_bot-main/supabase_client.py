@@ -10,24 +10,35 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ── Retry wrapper for all Supabase operations ────────────────
 
-def supabase_retry(operation, *args, retries=3, **kwargs):
+def supabase_retry(operation, *args, retries=2, **kwargs):
     """
     Execute a Supabase operation with retry logic.
-    Delays: 1s, 2s, 5s before the final failure.
-    Only retries on connection-level errors (ConnectionTerminated,
-    RemoteProtocolError, Server disconnected).
-    Other errors propagate immediately.
+    Total attempts: 3 (Initial attempt + max 2 retries).
+    Delays: 2s after 1st attempt, 5s after 2nd attempt.
     """
-    delays = [1, 2, 5]
+    import datetime
+    delays = [2, 5]
     last_exc = None
-    for attempt in range(1, retries + 1):
+    total_attempts = 1 + retries
+    op_name = getattr(operation, '__name__', 'anonymous_callable')
+    if op_name == '<lambda>':
+        op_name = "lambda_operation"
+
+    for attempt in range(1, total_attempts + 1):
         try:
             result = operation(*args, **kwargs)
             if attempt > 1:
-                logging.info("[SUPABASE RECOVERED] operation succeeded after %d retries", attempt)
+                logging.info(f"[SUPABASE RECOVERED] {op_name} succeeded on attempt {attempt}")
             return result
         except Exception as e:
             err_str = str(e)
+            timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            retry_count = attempt - 1
+            logging.warning(
+                f"[SUPABASE ERROR] Operation: {op_name} | Error: {err_str} | Timestamp: {timestamp} | Retry Count: {retry_count}"
+            )
+
+            # Check if retryable error
             if any(token in err_str for token in (
                 "ConnectionTerminated",
                 "RemoteProtocolError",
@@ -37,18 +48,16 @@ def supabase_retry(operation, *args, retries=3, **kwargs):
                 "timeout",
             )):
                 last_exc = e
-                if attempt < retries:
-                    logging.warning(
-                        "[SUPABASE RETRY] attempt %d/%d failed: %s",
-                        attempt, retries, err_str[:120],
-                    )
-                    time.sleep(delays[attempt - 1])
+                if attempt < total_attempts:
+                    sleep_time = delays[attempt - 1]
+                    logging.info(f"[SUPABASE RETRY] Sleeping {sleep_time}s before retry {attempt}...")
+                    time.sleep(sleep_time)
                 else:
                     logging.error(
-                        "[SUPABASE FAILED] all %d attempts failed: %s",
-                        retries, err_str[:200],
+                        f"[SUPABASE FAILED] Operation {op_name} permanently failed after {total_attempts} attempts: {err_str[:200]}"
                     )
                     raise
             else:
                 raise
     raise last_exc
+

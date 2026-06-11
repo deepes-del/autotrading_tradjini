@@ -31,20 +31,40 @@ MIN_BANKNIFTY_RECORDS  = 50    # minimum valid BANKNIFTY contracts expected
 INSERT_BATCH_SIZE      = 500   # rows per Supabase batch insert
 IST                    = pytz.timezone("Asia/Kolkata")
 
-# ── In-memory instrument cache (loaded once at startup, refreshed daily) ──────
-GLOBAL_INSTRUMENT_CACHE = {
-    "data":       None,   # list[dict] of all NIFTY/BANKNIFTY option records
-    "loaded_at":  None,   # datetime.datetime when cache was populated
-    "lock":       threading.Lock(),
-    "initialized": False, # True after first successful load
+# ── In-memory instrument map for O(1) ATM lookup ──────────────────────────────
+# Key format: "{INDEX}_{STRIKE}_{OPTION_TYPE}"  e.g. "NIFTY_23200_PE"
+# Value: {"token": str, "symbol": str, "expiry": str}
+instrument_map: dict[str, dict] = {}
+instrument_map_lock = threading.Lock()
+
+# Metadata for logging / admin
+INSTRUMENT_MAP_META = {
+    "nearest_expiry":   None,   # str like "2026-06-12"
+    "built_at":         None,   # datetime.datetime
+    "contract_count":   0,
+    "nifty_spot":       None,   # float — spot price used for strike range filter
+    "banknifty_spot":   None,
 }
 
 # ─────────────────────────────────────────────────────────────
 # Private: find any active broker session
 # ─────────────────────────────────────────────────────────────
 
+# Caching for active user sessions to avoid repeated Supabase calls
+_ACTIVE_USER_CACHE = {
+    "user_id": None,
+    "cached_at": 0.0
+}
+_active_user_lock = threading.Lock()
+
+
 def _get_any_active_user_id() -> str | None:
-    """Return any user_id that currently has an active broker session, prioritized by freshest first."""
+    """Return any user_id that currently has an active broker session, prioritized by freshest first (cached for 15s)."""
+    now = time.time()
+    with _active_user_lock:
+        if _ACTIVE_USER_CACHE["user_id"] is not None and (now - _ACTIVE_USER_CACHE["cached_at"]) < 15.0:
+            return _ACTIVE_USER_CACHE["user_id"]
+
     try:
         from supabase_client import supabase
         res = (
@@ -56,10 +76,16 @@ def _get_any_active_user_id() -> str | None:
             .execute()
         )
         if res.data:
-            return res.data[0]["user_id"]
+            uid = res.data[0]["user_id"]
+            with _active_user_lock:
+                _ACTIVE_USER_CACHE["user_id"] = uid
+                _ACTIVE_USER_CACHE["cached_at"] = now
+            return uid
     except Exception as exc:
         logging.error(f"[INSTRUMENT] Could not find active broker session: {exc}")
-    return None
+
+    with _active_user_lock:
+        return _ACTIVE_USER_CACHE["user_id"]
 
 
 # ─────────────────────────────────────────────────────────────
@@ -154,8 +180,8 @@ def refresh_instrument_master(force: bool = False) -> bool:
 
         logging.info(f"[INFO] Inserted {inserted} records into Supabase")
 
-        # 7. Populate in-memory cache
-        _reload_instrument_cache_from_db()
+        # 7. Rebuild in-memory map from live Tradejini API (not from Supabase)
+        build_instrument_map(force=True)
 
         # 8. Mark as done for today
         with _INSTRUMENT_STATE["refresh_lock"]:
@@ -276,32 +302,239 @@ def _batch_insert_instruments(supabase, records: list[dict], retries: int = 3) -
 
 
 # ─────────────────────────────────────────────────────────────
-# In-memory cache loader
+# In-memory instrument map builder — downloads from Tradejini
 # ─────────────────────────────────────────────────────────────
 
-def _reload_instrument_cache_from_db():
-    """Load all NIFTY/BANKNIFTY option records from Supabase into GLOBAL_INSTRUMENT_CACHE."""
-    from supabase_client import supabase, supabase_retry
+def _get_spot_yfinance(ticker_symbol: str) -> float | None:
+    """Fetch current index spot via yfinance. Used at startup/build time only."""
     try:
-        res = supabase_retry(
-            lambda: supabase.table("instrument_master")
-            .select("sym_id, trad_symbol, symbol, strike, expiry, option_type, lot_size, updated_date")
-            .in_("symbol", ["NIFTY", "BANKNIFTY"])
-            .execute()
-        )
-        records = res.data if res and res.data else []
-        with GLOBAL_INSTRUMENT_CACHE["lock"]:
-            GLOBAL_INSTRUMENT_CACHE["data"] = records
-            GLOBAL_INSTRUMENT_CACHE["loaded_at"] = datetime.datetime.now(IST)
-            GLOBAL_INSTRUMENT_CACHE["initialized"] = True
-        logging.info(f"[CACHE] Instrument cache loaded: {len(records)} records")
+        import yfinance as yf
+        df = yf.download(ticker_symbol, period="1d", interval="1m", progress=False)
+        if not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            return float(df['Close'].iloc[-1])
     except Exception as exc:
-        logging.error(f"[CACHE] Failed to load instrument cache: {exc}")
+        logging.warning(f"[SPOT] yfinance fetch failed for {ticker_symbol}: {exc}")
+    return None
 
 
+def build_instrument_map(force: bool = False) -> bool:
+    """
+    Download NFO instruments from Tradejini API, filter to NIFTY/BANKNIFTY
+    nearest-expiry CE/PE options within ±1500 of current spot, and populate
+    instrument_map for O(1) ATM lookup.
+
+    Rules:
+      - Runs at most once per startup unless force=True.
+      - Queries the broker API directly — NOT Supabase.
+      - NEVER called during trade execution.
+      - Thread-safe via instrument_map_lock.
+
+    Returns True on success, False on any failure.
+    """
+    with instrument_map_lock:
+        if not force and instrument_map:
+            logging.info("[INSTRUMENT MAP] Already built — skipping")
+            return True
+
+    # 1. Get any active broker session
+    user_id = _get_any_active_user_id()
+    if not user_id:
+        logging.error("[INSTRUMENT MAP] No active broker session — cannot download instruments")
+        return False
+
+    # 2. Download raw NFO instruments from Tradejini
+    logging.info("[INSTRUMENT MAP] Downloading NFO instruments from Tradejini...")
+    df = download_nfo_instruments(user_id)
+    if df is None or df.empty:
+        logging.error("[INSTRUMENT MAP] Download returned no data")
+        return False
+
+    # 3. Get current spot prices for strike range filter
+    nifty_spot = _get_spot_yfinance("^NSEI")
+    banknifty_spot = _get_spot_yfinance("^NSEBANK")
+    if nifty_spot is None:
+        nifty_spot = 23000.0
+        logging.warning(f"[INSTRUMENT MAP] NIFTY spot unavailable — using default {nifty_spot}")
+    if banknifty_spot is None:
+        banknifty_spot = 48000.0
+        logging.warning(f"[INSTRUMENT MAP] BANKNIFTY spot unavailable — using default {banknifty_spot}")
+
+    today = datetime.datetime.now(IST).date()
+
+    # 4. Parse & filter raw data
+    records_raw = []
+    for _, row in df.iterrows():
+        try:
+            sym_id_val = clean_val(row.get("symId"))
+            opt_type   = clean_val(row.get("optType")).upper()
+            search_txt = clean_val(row.get("searchText")).upper()
+            trad_sym   = (clean_val(row.get("tradSymbol"))
+                          or clean_val(row.get("dispSymbol"))
+                          or clean_val(row.get("dispName")))
+            expiry_raw = row.get("expiry")
+            strike_raw = row.get("strike")
+
+            if not sym_id_val or not trad_sym:
+                continue
+            if opt_type not in ("CE", "PE"):
+                continue
+
+            if "BANKNIFTY" in search_txt:
+                symbol = "BANKNIFTY"
+            elif "NIFTY" in search_txt and not any(
+                x in search_txt for x in ("FINNIFTY", "MIDCPNIFTY", "BANKFINIFTY")
+            ):
+                symbol = "NIFTY"
+            else:
+                continue
+
+            expiry_dt = pd.to_datetime(expiry_raw, errors="coerce")
+            if pd.isna(expiry_dt) or expiry_dt.date() < today:
+                continue
+            expiry_str = expiry_dt.strftime("%Y-%m-%d")
+
+            strike_num = float(str(strike_raw).replace(",", ""))
+            if abs(strike_num) >= 100_000:
+                strike_num = round(strike_num / 100.0, 2)
+
+            records_raw.append({
+                "sym_id":      sym_id_val,
+                "trad_symbol": trad_sym,
+                "symbol":      symbol,
+                "strike":      strike_num,
+                "expiry":      expiry_str,
+                "option_type": opt_type,
+            })
+        except (ValueError, TypeError, AttributeError):
+            continue
+
+    if not records_raw:
+        logging.error("[INSTRUMENT MAP] No valid NIFTY/BANKNIFTY contracts after parsing")
+        return False
+
+    # 5. Find nearest expiry
+    expiries = sorted(set(r["expiry"] for r in records_raw))
+    nearest_expiry = expiries[0]
+
+    # 6. Filter to nearest expiry + strike range ±1500
+    expiry_records = [r for r in records_raw if r["expiry"] == nearest_expiry]
+
+    new_map: dict[str, dict] = {}
+    count = 0
+    for r in expiry_records:
+        spot = nifty_spot if r["symbol"] == "NIFTY" else banknifty_spot
+        if abs(r["strike"] - spot) > 1500:
+            continue
+        key = f"{r['symbol']}_{int(r['strike'])}_{r['option_type']}"
+        new_map[key] = {
+            "token":  r["sym_id"],
+            "symbol": r["trad_symbol"],
+            "expiry": r["expiry"],
+        }
+        count += 1
+
+    # 7. Atomic swap
+    with instrument_map_lock:
+        instrument_map.clear()
+        instrument_map.update(new_map)
+        INSTRUMENT_MAP_META["nearest_expiry"]  = nearest_expiry
+        INSTRUMENT_MAP_META["built_at"]        = datetime.datetime.now(IST)
+        INSTRUMENT_MAP_META["contract_count"]  = count
+        INSTRUMENT_MAP_META["nifty_spot"]      = nifty_spot
+        INSTRUMENT_MAP_META["banknifty_spot"]  = banknifty_spot
+
+    logging.info(f"[INSTRUMENT CACHE] Loaded {count} contracts")
+    logging.info(f"[INSTRUMENT CACHE] Nearest expiry: {nearest_expiry}")
+    logging.info(f"[INSTRUMENT CACHE] NIFTY spot: {nifty_spot:.2f} | BANKNIFTY spot: {banknifty_spot:.2f}")
+
+    # 8. Also store in Supabase for admin dashboard (non-critical)
+    try:
+        from supabase_client import supabase, supabase_retry
+        supabase_records = _build_instrument_records_for_db(df, today)
+        if supabase_records:
+            # Clear previous day's data
+            try:
+                supabase_retry(
+                    lambda: supabase.table("instrument_master").delete().neq("sym_id", "").execute()
+                )
+            except Exception:
+                pass
+            _batch_insert_instruments(supabase, supabase_records)
+            logging.info(f"[INSTRUMENT MAP] Synced {len(supabase_records)} records to Supabase for admin")
+    except Exception as exc:
+        logging.warning(f"[INSTRUMENT MAP] Supabase sync skipped: {exc}")
+
+    return True
+
+
+def _build_instrument_records_for_db(df: pd.DataFrame, today: datetime.date) -> list[dict]:
+    """Build Supabase-ready records from raw broker DataFrame (subset of _build_instrument_records)."""
+    records = []
+    today_str = today.isoformat()
+    for _, row in df.iterrows():
+        sym_id_val  = clean_val(row.get("symId"))
+        opt_type    = clean_val(row.get("optType")).upper()
+        search_text = clean_val(row.get("searchText")).upper()
+        trad_sym    = (clean_val(row.get("tradSymbol"))
+                       or clean_val(row.get("dispSymbol"))
+                       or clean_val(row.get("dispName")))
+        expiry_raw  = row.get("expiry")
+        strike_raw  = row.get("strike")
+        lot_raw     = row.get("lot")
+
+        if not sym_id_val or not trad_sym:
+            continue
+        if opt_type not in ("CE", "PE"):
+            continue
+
+        if "BANKNIFTY" in search_text:
+            symbol = "BANKNIFTY"
+        elif "NIFTY" in search_text and not any(
+            x in search_text for x in ("FINNIFTY", "MIDCPNIFTY", "BANKFINIFTY")
+        ):
+            symbol = "NIFTY"
+        else:
+            continue
+
+        try:
+            expiry_dt = pd.to_datetime(expiry_raw, errors="coerce")
+            if pd.isna(expiry_dt) or expiry_dt.date() < today:
+                continue
+            expiry_str = expiry_dt.strftime("%Y-%m-%d")
+        except Exception:
+            continue
+
+        try:
+            strike_num = float(str(strike_raw).replace(",", ""))
+            if abs(strike_num) >= 100_000:
+                strike_num = round(strike_num / 100.0, 2)
+        except (ValueError, TypeError):
+            continue
+
+        try:
+            lot_size = int(float(str(lot_raw))) if lot_raw and clean_val(lot_raw) != "" else 0
+        except (ValueError, TypeError):
+            lot_size = 0
+
+        records.append({
+            "sym_id":       sym_id_val,
+            "trad_symbol":  trad_sym,
+            "symbol":       symbol,
+            "strike":       strike_num,
+            "expiry":       expiry_str,
+            "option_type":  opt_type,
+            "lot_size":     lot_size,
+            "updated_date": today_str,
+        })
+    return records
+
+
+# ── Backward-compatible alias ─────────────────────────────────
 def load_instrument_cache():
-    """Public entry point — called at app startup.  Loads from Supabase into memory."""
-    _reload_instrument_cache_from_db()
+    """Legacy entry point — delegates to build_instrument_map."""
+    build_instrument_map(force=False)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -386,8 +619,20 @@ def validate_instrument_master() -> dict:
 
 
 # ─────────────────────────────────────────────────────────────
-# Public: select_atm_option  (Supabase query — no DataFrame)
+# Public: select_atm_option  (O(1) map lookup — no DB)
 # ─────────────────────────────────────────────────────────────
+
+def _find_closest_strike(key_prefix: str, atm_strike: int, step: int, opt_type: str) -> str | None:
+    """Search ±5 steps from the desired strike for the closest match in instrument_map."""
+    with instrument_map_lock:
+        for offset in range(0, 6):
+            for sign in (1, -1) if offset > 0 else (1,):
+                test_strike = atm_strike + (sign * offset * step)
+                key = f"{key_prefix}_{test_strike}_{opt_type}"
+                if key in instrument_map:
+                    return key
+    return None
+
 
 def select_atm_option(
     user_id: str,
@@ -396,153 +641,69 @@ def select_atm_option(
     option_type: str = "PE",
 ) -> tuple:
     """
-    Find the nearest-expiry ATM option from GLOBAL_INSTRUMENT_CACHE.
+    Find ATM option via O(1) instrument_map lookup — zero database queries.
 
     Returns (sym_id, trad_symbol, ltp) or (None, None, None).
-    NEVER queries Supabase during trade execution.
-    Falls back to Supabase only if cache is empty (with retry).
     """
-    today      = datetime.datetime.now(IST).date().isoformat()
-    step       = 50 if index_name.upper() == "NIFTY" else 100
-    atm_strike = round(index_ltp / step) * step
-    opt_type   = option_type.upper().strip()
+    step        = 50 if index_name.upper() == "NIFTY" else 100
+    atm_strike  = round(index_ltp / step) * step
+    opt_type    = option_type.upper().strip()
+    index_upper = index_name.upper()
+    cache_key   = f"{index_upper}_{int(atm_strike)}_{opt_type}"
 
     logging.info(
-        f"[ATM LOOKUP] index={index_name} ltp={index_ltp:.2f} "
-        f"atm_strike={atm_strike} opt_type={opt_type}"
+        f"[ATM LOOKUP] {cache_key}  (spot={index_ltp:.2f})"
     )
 
-    # ── Try in-memory cache first ───────────────────────────────
-    records = None
-    try:
-        with GLOBAL_INSTRUMENT_CACHE["lock"]:
-            if GLOBAL_INSTRUMENT_CACHE["initialized"] and GLOBAL_INSTRUMENT_CACHE["data"] is not None:
-                records = GLOBAL_INSTRUMENT_CACHE["data"]
-    except Exception:
-        pass
+    # ── O(1) map lookup — RAM only, zero network ──────────────
+    with instrument_map_lock:
+        entry = instrument_map.get(cache_key)
 
-    if records is None:
-        logging.warning("[CACHE MISS] GLOBAL_INSTRUMENT_CACHE is empty — falling back to Supabase")
-        today_iso = today
-        try:
-            from supabase_client import supabase, supabase_retry
-            res = supabase_retry(
-                lambda: supabase.table("instrument_master")
-                .select("sym_id, trad_symbol, symbol, strike, expiry, option_type, lot_size, updated_date")
-                .in_("symbol", ["NIFTY", "BANKNIFTY"])
-                .execute()
-            )
-            if res and res.data:
-                records = res.data
-        except Exception as exc:
-            logging.error(f"[CACHE FAIL] Supabase fallback also failed: {exc}")
-            return None, None, None
-    else:
-        logging.info("[CACHE HIT] Using GLOBAL_INSTRUMENT_CACHE for ATM lookup")
+    if entry is None:
+        # Fallback: scan ±5 strikes for closest match
+        fallback_key = _find_closest_strike(index_upper, int(atm_strike), step, opt_type)
+        if fallback_key is not None:
+            with instrument_map_lock:
+                entry = instrument_map[fallback_key]
+            logging.info(f"[ATM LOOKUP] {cache_key} not found — closest: {fallback_key}")
+            cache_key = fallback_key
 
-    if not records:
-        logging.error("[ATM FAILURE] Reason: No instruments available (cache empty)")
-        return None, None, None
+    if entry is not None:
+        best_token  = entry["token"]
+        best_symbol = entry["symbol"]
+        logging.info(f"[ATM LOOKUP] {cache_key} → token found")
 
-    # ── Filter in Python ────────────────────────────────────────
-    try:
-        # Step 1: Filter by symbol + option_type + future expiry
-        symbol_index = index_name.upper()
-        filtered = [
-            r for r in records
-            if r.get("symbol") == symbol_index
-            and r.get("option_type") == opt_type
-            and str(r.get("expiry", "")) >= today
-        ]
-
-        if not filtered:
-            cache_age = _INSTRUMENT_STATE.get("last_refresh_date", "never")
-            logging.error(
-                f"[ATM FAILURE]\n\n"
-                f"Reason:\n"
-                f"No instruments after index filter\n\n"
-                f"Details: index={symbol_index} opt_type={opt_type} "
-                f"today={today}  total_in_cache={len(records)}  "
-                f"last_refresh={cache_age}"
-            )
-            return None, None, None
-
-        # Step 2: Find nearest expiry
-        unique_expiries = sorted(set(r["expiry"] for r in filtered if r.get("expiry")))
-        if not unique_expiries:
-            logging.error("[ATM FAILURE] Reason: No valid expiry dates in filtered records")
-            return None, None, None
-        nearest_expiry = unique_expiries[0]
-
-        # Step 3: Filter by that expiry
-        expiry_filtered = [r for r in filtered if r["expiry"] == nearest_expiry]
-        if not expiry_filtered:
-            logging.error(
-                f"[ATM FAILURE]\n\n"
-                f"Reason:\n"
-                f"No instruments after expiry filter\n\n"
-                f"Details: index={symbol_index} opt_type={opt_type} "
-                f"expiry={nearest_expiry}"
-            )
-            return None, None, None
-
-        filtered_count = len(expiry_filtered)
-        first_10 = expiry_filtered[:10]
-        first_10_str = "\n".join(
-            f"  strike={r.get('strike')} sym={r.get('trad_symbol')} "
-            f"tok={r.get('sym_id')}"
-            for r in first_10
-        )
-
-        logging.info(
-            f"[ATM DEBUG]\n\n"
-            f"User: {user_id}\n"
-            f"Index: {symbol_index}\n"
-            f"Index LTP: {index_ltp:.2f}\n"
-            f"Calculated ATM Strike: {atm_strike}\n"
-            f"Option Type: {opt_type}\n"
-            f"Selected Expiry: {nearest_expiry}\n\n"
-            f"Total Instrument Count: {len(records)}\n"
-            f"Filtered Instrument Count: {filtered_count}\n\n"
-            f"First 10 Filtered Instruments:\n{first_10_str}"
-        )
-
-        # Step 4: Pick strike closest to ATM
-        best = min(
-            expiry_filtered,
-            key=lambda r: abs(float(r["strike"]) - float(atm_strike))
-        )
-
-        best_token  = str(best["sym_id"])
-        best_symbol = str(best["trad_symbol"])
-
-        logging.info(
-            f"[ATM MATCH]\n"
-            f"user={user_id}\n"
-            f"token={best_token}\n"
-            f"symbol={best_symbol}\n"
-            f"expiry={best['expiry']}"
-        )
-
-        # Step 5: Fetch live LTP (only network call at trade time)
+        # LTP fetch (only network call at trade time)
         import data_fetcher
         option_ltp = data_fetcher.get_ltp(user_id, "NFO", best_symbol, best_token)
-        if option_ltp is None:
-            logging.error(
-                f"[ATM FAILURE]\n\n"
-                f"Reason:\n"
-                f"LTP fetch failed\n\n"
-                f"Details: LTP fetch failed — token={best_token} "
-                f"sym={best_symbol} (check broker session)"
-            )
+
+        if option_ltp is not None:
+            logging.info(f"[ATM FOUND] sym={best_symbol} tok={best_token} ltp={option_ltp}")
+            return best_token, best_symbol, float(option_ltp)
+        else:
+            logging.error(f"[ATM FAILURE] LTP fetch failed for {cache_key} — check broker session")
             return best_token, best_symbol, None
 
-        logging.info(f"[ATM FOUND] sym={best_symbol} tok={best_token} ltp={option_ltp}")
-        return best_token, best_symbol, float(option_ltp)
+    # ── Complete failure — nothing in cache for this strike ──
+    with instrument_map_lock:
+        total = len(instrument_map)
+        meta = dict(INSTRUMENT_MAP_META)
 
-    except Exception as exc:
-        logging.error(f"[ERROR] select_atm_option exception: {exc}", exc_info=True)
-        return None, None, None
+    logging.error(
+        f"[ATM FAILURE]\n\n"
+        f"Reason: No matching strike in instrument_map\n\n"
+        f"Key: {cache_key}\n"
+        f"Index: {index_upper}\n"
+        f"Spot LTP: {index_ltp:.2f}\n"
+        f"ATM Strike: {atm_strike}\n"
+        f"Option Type: {opt_type}\n\n"
+        f"Instrument Map: {total} contracts\n"
+        f"Nearest Expiry: {meta.get('nearest_expiry')}\n"
+        f"Built At: {meta.get('built_at')}\n"
+        f"NIFTY Spot (build): {meta.get('nifty_spot')}\n"
+        f"BANKNIFTY Spot (build): {meta.get('banknifty_spot')}"
+    )
+    return None, None, None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1025,11 +1186,50 @@ def _extract_order_id(payload) -> str | None:
     return str(order_id) if order_id else None
 
 
+def verify_broker_order_placed(user_id: str, symboltoken: str, qty: int, side: str, remarks: str) -> str | None:
+    """
+    Check the broker's order book for a matching order to prevent duplicate execution.
+    Looks for orders placed recently (matching symboltoken, qty, side, and remarks).
+    Returns the order ID if found, otherwise None.
+    """
+    try:
+        logging.info(f"[ORDER SAFETY] Checking order book for duplicate check... user={user_id} token={symboltoken} side={side}")
+        res = _get("/api/oms/orders", user_id)
+        orders = _extract_rows(res)
+
+        for order in orders:
+            ord_tok = order.get("symId")
+            try:
+                ord_qty = int(order.get("qty") or 0)
+            except ValueError:
+                ord_qty = 0
+
+            ord_side = str(order.get("side", "")).lower()
+            ord_remarks = str(order.get("remarks", ""))
+
+            # Check matches
+            if (str(ord_tok) == str(symboltoken) and 
+                int(ord_qty) == int(qty) and 
+                ord_side == side.lower() and 
+                ord_remarks == remarks):
+
+                status = str(order.get("status", "")).lower()
+                if status not in ("rejected", "cancelled", "canceled"):
+                    order_id = order.get("orderId") or order.get("orderid")
+                    if order_id:
+                        logging.info(f"[ORDER SAFETY] Duplicate order verified! Found existing order {order_id} with status {status}")
+                        return str(order_id)
+    except Exception as exc:
+        logging.error(f"[ORDER SAFETY] Error verifying broker state: {exc}")
+    return None
+
+
 def place_order_tradejini(user_id: str, payload: dict) -> dict:
     """
     Central function to place orders with Tradejini.
     Returns structured result: {success, order_id, message, raw}
-    NEVER returns a false success — always validates "s": "ok" in response.
+    NEVER retries order placement.
+    If the response is unclear, verifies broker state to prevent duplicate trades.
     """
     def _fail(msg: str, raw=None) -> dict:
         return {"success": False, "order_id": None, "message": msg, "raw": raw}
@@ -1050,24 +1250,20 @@ def place_order_tradejini(user_id: str, payload: dict) -> dict:
             payload["mktProt"] = 5
             logging.error(f"[ORDER] mktProt error: {e}")
 
-    # 2. Retry logic — 3 attempts
+    # Single attempt placement
+    unclear = False
     last_msg = "Unknown error"
     last_raw = None
-    for attempt in range(1, 4):
-        try:
-            res = _post_form("/api/oms/place-order", user_id, payload)
 
-            # Always log raw response for debugging
-            logging.info(f"[ORDER RESPONSE] attempt={attempt} | remarks={payload.get('remarks')} | raw={res}")
+    try:
+        res = _post_form("/api/oms/place-order", user_id, payload)
+        logging.info(f"[ORDER RESPONSE] remarks={payload.get('remarks')} | raw={res}")
 
-            if not isinstance(res, dict):
-                last_msg = f"Non-dict response: {res}"
-                last_raw = res
-                logging.error(f"[ORDER FAIL] {payload.get('remarks')} | attempt {attempt} | {last_msg}")
-                time.sleep(1)
-                continue
-
-            # 3. Strict validation — must have "s": "ok"
+        if not isinstance(res, dict):
+            last_msg = f"Non-dict response: {res}"
+            last_raw = res
+            unclear = True
+        else:
             status = str(res.get("s", "")).lower()
             broker_msg = res.get("msg") or res.get("message") or res.get("errmsg") or "No message from broker"
 
@@ -1076,23 +1272,33 @@ def place_order_tradejini(user_id: str, payload: dict) -> dict:
                 if order_id:
                     logging.info(f"[ORDER SUCCESS] {payload.get('remarks')} | ID: {order_id}")
                     return {"success": True, "order_id": order_id, "message": broker_msg, "raw": res}
-                # "ok" but no order ID — treat as failure
-                last_msg = "Broker returned ok but no order ID"
-                last_raw = res
-                logging.error(f"[ORDER FAIL] {payload.get('remarks')} | {last_msg} | raw={res}")
+                else:
+                    last_msg = "Broker returned ok but no order ID"
+                    last_raw = res
+                    unclear = True
             else:
                 last_msg = str(broker_msg)
                 last_raw = res
-                logging.error(f"[ORDER FAIL] {payload.get('remarks')} | attempt {attempt} | broker_status={status} | msg={last_msg}")
+    except Exception as exc:
+        last_msg = str(exc)
+        last_raw = None
+        logging.error(f"[ORDER EXCEPTION] {payload.get('remarks')} | {exc}")
+        unclear = True
 
-        except Exception as exc:
-            last_msg = str(exc)
-            logging.error(f"[ORDER EXCEPTION] {payload.get('remarks')} | attempt {attempt} | {exc}")
+    # If the outcome was unclear, verify if it actually succeeded on the broker side.
+    if unclear:
+        existing_order_id = verify_broker_order_placed(
+            user_id=user_id,
+            symboltoken=payload.get("symId", ""),
+            qty=payload.get("qty", 0),
+            side=payload.get("side", ""),
+            remarks=payload.get("remarks", "")
+        )
+        if existing_order_id:
+            logging.info(f"[ORDER SAFETY] Unclear placement verified as SUCCESS with ID: {existing_order_id}")
+            return {"success": True, "order_id": existing_order_id, "message": "Verified from order book", "raw": last_raw}
 
-        if attempt < 3:
-            time.sleep(1)
-
-    logging.error(f"[ORDER FATAL] All 3 attempts failed for {payload.get('remarks')} | last_msg={last_msg}")
+    logging.error(f"[ORDER FATAL] Placement failed for {payload.get('remarks')} | msg={last_msg}")
     return _fail(last_msg, last_raw)
 
 

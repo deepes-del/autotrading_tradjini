@@ -342,3 +342,48 @@ def _disable_trading(user_id: str):
         logging.info(f"[AUTO LOGIN] Trading disabled and bot stopped for User: {user_id}")
     except Exception as exc:
         logging.error(f"[AUTO LOGIN] Failed to update users table to stop bot: {exc}")
+
+
+# ── Central User Status Caching ─────────────────────────────────────────────
+
+USER_STATUS_CACHE: dict[str, dict] = {}
+user_status_lock = threading.Lock()
+_status_sync_started = False
+_status_sync_lock = threading.Lock()
+
+def get_cached_user_status(user_id: str) -> dict | None:
+    with user_status_lock:
+        return USER_STATUS_CACHE.get(user_id)
+
+def start_user_status_sync_loop():
+    global _status_sync_started
+    with _status_sync_lock:
+        if not _status_sync_started:
+            t = threading.Thread(target=_user_status_sync_loop, daemon=True)
+            t.start()
+            _status_sync_started = True
+            logging.info("[USER_STATUS_SYNC] Started user status sync background thread.")
+
+def _user_status_sync_loop():
+    from supabase_client import supabase_retry
+    while True:
+        try:
+            res = supabase_retry(
+                lambda: supabase.table("users").select("user_id, status, bot_running").execute()
+            )
+            if res and res.data:
+                new_cache = {}
+                for row in res.data:
+                    u_id = row.get("user_id")
+                    if u_id:
+                        new_cache[u_id] = {
+                            "status": row.get("status"),
+                            "bot_running": row.get("bot_running", False)
+                        }
+                with user_status_lock:
+                    USER_STATUS_CACHE.clear()
+                    USER_STATUS_CACHE.update(new_cache)
+        except Exception as e:
+            logging.error(f"[USER_STATUS_SYNC] Error in user status sync: {e}")
+        time.sleep(20)
+

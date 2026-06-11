@@ -85,15 +85,114 @@ market_cache_lock = threading.Lock()
 _engine_started = False
 _engine_lock = threading.Lock()
 
+# Centralized Option LTP Cache and Active Set
+OPTION_LTP_CACHE = {}         # token -> {"price": float, "updated_at": float}
+ACTIVE_OPTION_TOKENS = {}     # token -> {"symbol": str, "last_requested": float}
+option_cache_lock = threading.Lock()
+
 
 def start_market_data_engine():
     global _engine_started
     with _engine_lock:
         if not _engine_started:
-            t = threading.Thread(target=_market_data_engine_loop, daemon=True)
-            t.start()
+            import session_manager
+            # Start Market data loop
+            t1 = threading.Thread(target=_market_data_engine_loop, daemon=True)
+            t1.start()
+            # Start Option LTP polling loop
+            t2 = threading.Thread(target=_option_ltp_engine_loop, daemon=True)
+            t2.start()
+            # Start Central User Status Sync loop
+            session_manager.start_user_status_sync_loop()
+
             _engine_started = True
-            logging.info("[MARKET ENGINE] Central Market Data Engine thread started.")
+            logging.info("[MARKET ENGINE] Central Market Data, Option, and User Status Engines started.")
+
+
+def _option_ltp_engine_loop():
+    import order_manager
+    logging.info("[OPTION ENGINE] Central Option LTP Engine loop started.")
+    while True:
+        try:
+            now = time.time()
+            active_tokens = []
+            with option_cache_lock:
+                for tok, info in list(ACTIVE_OPTION_TOKENS.items()):
+                    if now - info["last_requested"] < 10:
+                        active_tokens.append((tok, info["symbol"]))
+                    else:
+                        ACTIVE_OPTION_TOKENS.pop(tok, None)
+
+            if active_tokens:
+                user_id = order_manager._get_any_active_user_id()
+                if user_id:
+                    for tok, sym in active_tokens:
+                        try:
+                            ltp = _fetch_option_ltp_raw(user_id, tok, sym)
+                            if ltp is not None:
+                                with option_cache_lock:
+                                    OPTION_LTP_CACHE[tok] = {
+                                        "price": float(ltp),
+                                        "updated_at": time.time()
+                                    }
+                        except Exception as e:
+                            logging.error(f"[OPTION ENGINE] Error fetching LTP for token {tok}: {e}")
+                else:
+                    logging.warning("[OPTION ENGINE] No active broker session found to poll options.")
+        except Exception as err:
+            logging.error(f"[OPTION ENGINE] Error in loop: {err}", exc_info=True)
+        time.sleep(1)
+
+
+def _fetch_option_ltp_raw(user_id: str, symboltoken: str, symbol: str) -> float | None:
+    now_ts = int(time.time())
+    from_ts = now_ts - 600  # last 10 minutes
+    symbol_id = symboltoken
+
+    url = f"{BASE_URL}/api/mkt-data/chart/interval-data"
+    params = {
+        "id": symbol_id,
+        "interval": "1",
+        "from": from_ts,
+        "to": now_ts,
+    }
+
+    # Standard retry delays: 2s after 1st attempt, 5s after 2nd attempt. Max 3 attempts total.
+    delays = [2, 5]
+    for attempt in range(1, 4):
+        try:
+            _log_auth_check(user_id, "market_data")
+            response = requests.get(
+                url, headers=_headers(user_id), params=params, timeout=10
+            )
+            if response.status_code == 200:
+                res = response.json()
+                bars = res.get("d", {}).get("bars", [])
+                if bars:
+                    return float(bars[-1][4])
+            elif _is_auth_error(response):
+                logging.warning(f"[SESSION EXPIRED] User: {user_id} in option raw fetch")
+                from session_manager import attempt_broker_auto_login
+                if attempt_broker_auto_login(user_id):
+                    # Retry once with fresh token
+                    response = requests.get(
+                        url, headers=_headers(user_id), params=params, timeout=10
+                    )
+                    if response.status_code == 200:
+                        res = response.json()
+                        bars = res.get("d", {}).get("bars", [])
+                        if bars:
+                            return float(bars[-1][4])
+                _handle_401(user_id, url)
+                break
+            else:
+                logging.error(f"[FETCH ERROR] Status: {response.status_code} | Token: {symbol_id}")
+        except Exception as e:
+            logging.error(f"[FETCH EXCEPTION] token={symbol_id} | attempt={attempt} | {e}")
+
+        if attempt < 3:
+            time.sleep(delays[attempt - 1])
+    return None
 
 
 def _market_data_engine_loop():
@@ -205,18 +304,32 @@ def _market_data_engine_loop():
                     continue
 
                 recent_df = df.tail(5)
+                latest_candle = recent_df.iloc[-1]
+                latest_ts = latest_candle['timestamp_ist'] if 'timestamp_ist' in latest_candle else recent_df.index[-1]
 
                 # Strategy One
-                is_setup_valid, s_low, s_high, s_ema, s_time = strategy_one.get_setup_levels(recent_df)
-                _update_shared_setup_and_signals(
-                    index_name, "strategy_one", is_setup_valid, s_low, s_high, s_ema, s_time, live_ltp, last_candle_time
-                )
+                last_t_s1 = last_candle_time[index_name]["strategy_one"]
+                if latest_ts != last_t_s1:
+                    is_setup_valid, s_low, s_high, s_ema, s_time = strategy_one.get_setup_levels(recent_df)
+                    _update_shared_setup_and_signals(
+                        index_name, "strategy_one", is_setup_valid, s_low, s_high, s_ema, s_time, live_ltp, last_candle_time, is_new_candle=True
+                    )
+                else:
+                    _update_shared_setup_and_signals(
+                        index_name, "strategy_one", None, None, None, None, latest_ts, live_ltp, last_candle_time, is_new_candle=False
+                    )
 
                 # Strategy Two
-                is_setup_valid_s2, s_low_s2, s_high_s2, s_ema_s2, s_time_s2, candle_size = strategy_two.get_setup_levels(recent_df)
-                _update_shared_setup_and_signals(
-                    index_name, "strategy_two", is_setup_valid_s2, s_low_s2, s_high_s2, s_ema_s2, s_time_s2, live_ltp, last_candle_time
-                )
+                last_t_s2 = last_candle_time[index_name]["strategy_two"]
+                if latest_ts != last_t_s2:
+                    is_setup_valid_s2, s_low_s2, s_high_s2, s_ema_s2, s_time_s2, candle_size = strategy_two.get_setup_levels(recent_df)
+                    _update_shared_setup_and_signals(
+                        index_name, "strategy_two", is_setup_valid_s2, s_low_s2, s_high_s2, s_ema_s2, s_time_s2, live_ltp, last_candle_time, is_new_candle=True
+                    )
+                else:
+                    _update_shared_setup_and_signals(
+                        index_name, "strategy_two", None, None, None, None, latest_ts, live_ltp, last_candle_time, is_new_candle=False
+                    )
 
         except Exception as err:
             logging.error(f"[MARKET ENGINE] Error in loop: {err}", exc_info=True)
@@ -225,17 +338,17 @@ def _market_data_engine_loop():
 def _update_shared_setup_and_signals(
     index_name: str,
     strategy: str,
-    is_setup_valid: bool,
-    s_low: float,
-    s_high: float,
-    s_ema: float,
+    is_setup_valid: bool | None,
+    s_low: float | None,
+    s_high: float | None,
+    s_ema: float | None,
     s_time,
     live_ltp: float | None,
-    last_candle_time: dict
+    last_candle_time: dict,
+    is_new_candle: bool = False
 ):
     with market_cache_lock:
-        last_t = last_candle_time[index_name][strategy]
-        if s_time != last_t:
+        if is_new_candle:
             last_candle_time[index_name][strategy] = s_time
             SHARED_SETUPS[index_name][strategy] = None
             if is_setup_valid:
@@ -265,13 +378,34 @@ def _update_shared_setup_and_signals(
         if setup and live_ltp is not None:
             if live_ltp < setup['low']:
                 logging.info(f"[MARKET ENGINE] Breakdown triggered for {index_name} {strategy} at {live_ltp:.2f}")
+
+                # ── Central Instrument Selection ───────────────────
+                import order_manager
+                opt_tok, opt_sym, option_ltp = None, None, None
+                user_id = order_manager._get_any_active_user_id()
+                if user_id:
+                    opt_tok, opt_sym, option_ltp = order_manager.select_atm_option(
+                        user_id=user_id,
+                        index_ltp=live_ltp,
+                        index_name=index_name,
+                        option_type="PE"
+                    )
+
+                if opt_tok:
+                    logging.info(f"[MARKET ENGINE] Central instrument selected: {opt_sym} (token={opt_tok})")
+                else:
+                    logging.error(f"[MARKET ENGINE] Central instrument selection FAILED for {index_name} {strategy}")
+
                 SHARED_SIGNALS[index_name][strategy] = {
                     "symbol": index_name,
                     "direction": "PE",
                     "entry_price": live_ltp,
                     "strategy": strategy,
                     "timestamp": time.time(),
-                    "setup": setup
+                    "setup": setup,
+                    "opt_tok": opt_tok,
+                    "opt_sym": opt_sym,
+                    "option_ltp": option_ltp
                 }
                 # Clear the setup once triggered
                 SHARED_SETUPS[index_name][strategy] = None
@@ -627,104 +761,43 @@ def get_ltp(
 ) -> float | None:
     """
     Return the live last-traded price.
-    Uses yfinance for indices, Tradejini v2 chart API for options.
+    Uses yfinance for indices, central option LTP cache for option contracts.
     """
-    now_ts = int(time.time())
     is_index = symboltoken in INDEX_YF_MAP
     
     if is_index:
         ticker = INDEX_YF_MAP[symboltoken]
         index_name = "NIFTY" if ticker == "^NSEI" else "BANKNIFTY"
-
-        logging.info(
-            f"[MARKET CACHE HIT]\n\n"
-            f"User: {user_id}\n\n"
-            f"Source:\nShared Cache"
-        )
         with market_cache_lock:
             return MARKET_LTP_CACHE.get(index_name)
         
     else:
-        from_ts = now_ts - 600  # last 10 minutes
-        symbol_id = symboltoken
+        # Check central Option LTP Cache
+        now = time.time()
+        with option_cache_lock:
+            # Register/refresh in active set so the background loop polls it
+            if symboltoken not in ACTIVE_OPTION_TOKENS:
+                ACTIVE_OPTION_TOKENS[symboltoken] = {
+                    "symbol": symbol,
+                    "last_requested": now
+                }
+            else:
+                ACTIVE_OPTION_TOKENS[symboltoken]["last_requested"] = now
 
-        url = f"{BASE_URL}/api/mkt-data/chart/interval-data"
-        params = {
-            "id": symbol_id,
-            "interval": "1",
-            "from": from_ts,
-            "to": now_ts,
-        }
-
-        from session_manager import get_user_session
-        broker_ctx = get_user_session(user_id)
-        token_prefix = "None"
-        client_id = "None"
-        if broker_ctx:
-            tok = broker_ctx.get("access_token", "")
-            token_prefix = f"{tok[:6]}..." if tok else "None"
-            client_id = broker_ctx.get("client_id", "")
+            cached = OPTION_LTP_CACHE.get(symboltoken)
+            if cached is not None:
+                age = now - cached["updated_at"]
+                if age < 2.0:
+                    # Cache hit!
+                    return cached["price"]
         
-        logging.info(
-            f"[LTP FETCH]\n"
-            f"user={user_id}\n"
-            f"token={token_prefix}\n"
-            f"client={client_id}"
-        )
-
-        for attempt in range(3):
-            try:
-                time.sleep(0.3)
-                _log_auth_check(user_id, "market_data")
-                response = requests.get(
-                    url, headers=_headers(user_id), params=params, timeout=10
-                )
-                if response.status_code == 200:
-                    res = response.json()
-                    bars = res.get("d", {}).get("bars", [])
-
-                    if bars:
-                        # Tradejini format: [time, open, high, low, close, volume, oi]
-                        return float(bars[-1][4])
-                    else:
-                        logging.error(f"[LTP NFO] No bars in response for token={symbol_id} | raw={res}")
-                elif _is_auth_error(response):
-                    logging.warning(
-                        f"[SESSION EXPIRED]\n\n"
-                        f"User: {user_id}"
-                    )
-                    print(f"[SESSION EXPIRED]\nUser: {user_id}", flush=True)
-                    from session_manager import attempt_broker_auto_login
-                    if attempt_broker_auto_login(user_id):
-                        # Retry once with fresh token
-                        response = requests.get(
-                            url, headers=_headers(user_id), params=params, timeout=10
-                        )
-                        if response.status_code == 200:
-                            logging.info(
-                                f"[REQUEST RETRY SUCCESS]\n\n"
-                                f"User: {user_id}"
-                            )
-                            res = response.json()
-                            bars = res.get("d", {}).get("bars", [])
-                            if bars:
-                                return float(bars[-1][4])
-                            else:
-                                logging.error(f"[LTP NFO] No bars after retry for token={symbol_id}")
-                        else:
-                            _handle_401(user_id, url)
-                            break
-                    else:
-                        _handle_401(user_id, url)
-                        break
-                else:
-                    logging.error(f"[FETCH ERROR] Status: {response.status_code} | Token: {symbol_id} | Text: {response.text}")
-
-            except Exception as e:
-                logging.error(f"[FETCH EXCEPTION] token={symbol_id} | {e}")
-                if 'response' in locals():
-                    logging.error(f"Raw Response: {response.text}")
-                time.sleep(1)
-
-        logging.error(f"[LTP NFO] All attempts failed or auth failure for token={symbol_id}")
+        # If cache miss or stale, fetch directly and update cache (fallback)
+        ltp = _fetch_option_ltp_raw(user_id, symboltoken, symbol)
+        if ltp is not None:
+            with option_cache_lock:
+                OPTION_LTP_CACHE[symboltoken] = {
+                    "price": float(ltp),
+                    "updated_at": time.time()
+                }
+            return float(ltp)
         return None

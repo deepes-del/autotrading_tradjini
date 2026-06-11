@@ -246,13 +246,6 @@ def _run_bot_logic(user_config: dict) -> None:
         if user_config.get("stop_requested"):
             return
 
-        # Log cache hit
-        logging.info(
-            f"[MARKET CACHE HIT]\n\n"
-            f"User: {user_id}\n\n"
-            f"Source:\nShared Cache"
-        )
-
         global_df = data_fetcher.MARKET_DATA_CACHE.get(user_index)
         if global_df is not None and len(global_df) > 0:
             break
@@ -281,51 +274,16 @@ def _run_bot_logic(user_config: dict) -> None:
             add_log(user_id, "Bot stopped by user request.")
             break
 
-        # ── Supabase safety check (cached, max once per 30s) ─────────────
-        # Admin may have blocked/deleted the user or set bot_running=False.
-        # Uses an in-memory cache to avoid live Supabase queries during trading.
-        if time.time() - last_db_check > 30:
-            last_db_check = time.time()
-
-            should_query_live = True
-
-            # Try cache first
-            if cached_user_status is not None:
-                cache_age = time.time() - cached_user_status.get("_cached_at", 0)
-                if cache_age < 30:
-                    should_query_live = False
-                    row = cached_user_status
-                    logging.info("[CACHE HIT] Bot safety status from cache")
-                    if row.get("status") == "blocked":
-                        add_log(user_id, "🚫 Account blocked by admin — bot terminating.")
-                        break
-                    if not row.get("bot_running", True):
-                        add_log(user_id, "⏹️ bot_running=False detected in DB — stopping.")
-                        break
-
-            if should_query_live:
-                logging.info("[CACHE MISS] Querying Supabase for bot safety status")
-                from supabase_client import supabase as _sb
-                from supabase_client import supabase_retry
-                try:
-                    db_res = supabase_retry(
-                        lambda: _sb.table("users").select("status, bot_running").eq("user_id", user_id).execute()
-                    )
-                    if not db_res or not db_res.data:
-                        add_log(user_id, "🚫 User not found in DB — bot terminating.")
-                        logging.warning(f"[BOT SAFETY] User {user_id} missing from DB. Stopping.")
-                        break
-                    row = db_res.data[0]
-                    cached_user_status = {**row, "_cached_at": time.time()}
-                    if row.get("status") == "blocked":
-                        add_log(user_id, "🚫 Account blocked by admin — bot terminating.")
-                        break
-                    if not row.get("bot_running", True):
-                        add_log(user_id, "⏹️ bot_running=False detected in DB — stopping.")
-                        break
-                except Exception as _db_exc:
-                    logging.warning(f"[BOT SAFETY] DB check failed (non-fatal): {_db_exc}")
-                    # Non-fatal — bot continues; next iteration will retry
+        # ── Centralized user safety status check (cached in session_manager) ──
+        import session_manager
+        status_row = session_manager.get_cached_user_status(user_id)
+        if status_row is not None:
+            if status_row.get("status") == "blocked":
+                add_log(user_id, "🚫 Account blocked by admin — bot terminating.")
+                break
+            if not status_row.get("bot_running", True):
+                add_log(user_id, "⏹️ bot_running=False detected in DB — stopping.")
+                break
 
         ist_now      = datetime.datetime.now(config.TIMEZONE)
         market_start = ist_now.replace(hour=9,  minute=15, second=0, microsecond=0)
@@ -397,11 +355,6 @@ def _run_bot_logic(user_config: dict) -> None:
 
         # ── Update Candle Data (Every 5 mins or on loop) ──────
         # Read from Central Cache instead of fetching yfinance
-        logging.info(
-            f"[MARKET CACHE HIT]\n\n"
-            f"User: {user_id}\n\n"
-            f"Source:\nShared Cache"
-        )
         global_df = data_fetcher.MARKET_DATA_CACHE.get(user_index)
         setup = data_fetcher.SHARED_SETUPS.get(user_index, {}).get(user_strategy)
 
@@ -541,7 +494,7 @@ def _run_bot_logic(user_config: dict) -> None:
         if active_trade is None:
             # Check setup for periodic logging
             if setup:
-                if time.time() - last_log_time > 60:
+                if time.time() - last_log_time > 300:
                     add_log(user_id, f"🧠 Active Setup:\nWatching breakdown below {setup['low']:.2f}")
                     add_log(user_id, "⏳ Monitoring price...")
                     last_log_time = time.time()
@@ -555,12 +508,7 @@ def _run_bot_logic(user_config: dict) -> None:
                     if time.time() - signal["timestamp"] < 60:
                         last_processed_signal_time = signal["timestamp"]
 
-                        # Log cache hit for signal consumption
-                        logging.info(
-                            f"[MARKET CACHE HIT]\n\n"
-                            f"User: {user_id}\n\n"
-                            f"Source:\nShared Cache"
-                        )
+                        # Consume signal
 
                         setup = signal["setup"]
                         index_ltp = signal["entry_price"]
@@ -597,17 +545,13 @@ def _run_bot_logic(user_config: dict) -> None:
 
                             add_log(user_id, f"📊 Strategy Signal Detected (INDEX):\ncandle_range: {candle_range:.2f}\nentry_price: {entry_price:.2f}")
 
-                            # ── ATM lookup via Supabase instrument_master ───────────
-                            # No instrument download here — data was loaded at 08:45 AM.
-                            opt_tok, opt_sym, option_ltp = order_manager.select_atm_option(
-                                user_id=user_id,
-                                index_ltp=index_ltp,
-                                index_name=user_index,
-                                option_type="PE",
-                            )
+                            # ── Read pre-selected instrument from central signal ──
+                            opt_tok = signal.get("opt_tok")
+                            opt_sym = signal.get("opt_sym")
+                            option_ltp = signal.get("option_ltp")
 
-                            logging.info(f"[ATM RESULT] User={user_id} Token={opt_tok} Symbol={opt_sym} LTP={option_ltp}")
-                            add_log(user_id, f"🔍 ATM Result: tok={opt_tok} sym={opt_sym} ltp={option_ltp}")
+                            logging.info(f"[SHARED INSTRUMENT] User={user_id} Token={opt_tok} Symbol={opt_sym} LTP={option_ltp}")
+                            add_log(user_id, f"🔍 Instrument loaded from signal: tok={opt_tok} sym={opt_sym} ltp={option_ltp}")
 
                             if opt_tok and option_ltp:
                                 # ── 1. Store Strategy Signal ──────────────────

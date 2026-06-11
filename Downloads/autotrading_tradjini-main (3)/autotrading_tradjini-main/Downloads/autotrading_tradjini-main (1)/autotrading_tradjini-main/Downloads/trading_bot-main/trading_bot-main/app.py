@@ -882,7 +882,7 @@ def _daily_instrument_scheduler():
     if it's time (08:00 AM IST) to refresh instruments.
     """
     import time
-    from order_manager import IST, refresh_instrument_master
+    from order_manager import IST, build_instrument_map
     import datetime
 
     logging.info("[SCHEDULER] Daily instrument refresh scheduler started.")
@@ -891,8 +891,7 @@ def _daily_instrument_scheduler():
             now = datetime.datetime.now(IST)
             # Run at 08:00 AM IST
             if now.hour == 8 and now.minute == 0:
-                # We call refresh; it internally prevents duplicate runs on the same day
-                refresh_instrument_master()
+                build_instrument_map(force=True)
         except Exception as exc:
             logging.error(f"[SCHEDULER] Error in daily scheduler loop: {exc}")
         
@@ -964,23 +963,9 @@ def startup_event():
     # Validate active sessions
     validate_active_sessions_startup()
 
-    logging.info("[STARTUP] Checking instrument master data...")
-    from order_manager import validate_instrument_master, refresh_instrument_master, load_instrument_cache
-    
-    # 1. Validate what we have in Supabase
-    status = validate_instrument_master()
-    if not status["valid"]:
-        logging.warning(f"[STARTUP] Instrument validation failed ({status.get('reason')}). Attempting immediate refresh...")
-        success = refresh_instrument_master(force=True)
-        if success:
-            logging.info("[STARTUP] Immediate refresh successful — cache populated by refresh.")
-        else:
-            logging.error("[STARTUP] Immediate refresh failed. Bot may not have instruments.")
-            # Attempt to load stale cache anyway
-            load_instrument_cache()
-    else:
-        logging.info("[STARTUP] Instrument data looks good. Loading into memory cache...")
-        load_instrument_cache()
+    logging.info("[STARTUP] Building instrument map from Tradejini API...")
+    from order_manager import build_instrument_map
+    build_instrument_map(force=True)
 
     # 2. Start the daily scheduler thread
     scheduler_thread = threading.Thread(target=_daily_instrument_scheduler, daemon=True)
