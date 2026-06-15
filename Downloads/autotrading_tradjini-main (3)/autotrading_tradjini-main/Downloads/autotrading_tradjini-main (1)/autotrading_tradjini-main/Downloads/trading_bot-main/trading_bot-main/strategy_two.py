@@ -21,11 +21,8 @@ def get_setup_levels(df):
 
     # Strategy Two Conditions: 
     # 1. candle_low > EMA5
-    # 2. candle_size <= 25 points
+    # (Note: candle_size <= 25 points restriction is removed to support larger candle setups with capped SL)
     
-    ema_valid = setup_low > setup_ema
-    size_valid = candle_size <= 25
-
-    setup_valid = ema_valid and size_valid
+    setup_valid = setup_low > setup_ema
 
     return setup_valid, setup_low, setup_high, setup_ema, candle_time, candle_size

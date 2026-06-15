@@ -324,7 +324,7 @@ def _market_data_engine_loop():
                 if latest_ts != last_t_s2:
                     is_setup_valid_s2, s_low_s2, s_high_s2, s_ema_s2, s_time_s2, candle_size = strategy_two.get_setup_levels(recent_df)
                     _update_shared_setup_and_signals(
-                        index_name, "strategy_two", is_setup_valid_s2, s_low_s2, s_high_s2, s_ema_s2, s_time_s2, live_ltp, last_candle_time, is_new_candle=True
+                        index_name, "strategy_two", is_setup_valid_s2, s_low_s2, s_high_s2, s_ema_s2, s_time_s2, live_ltp, last_candle_time, is_new_candle=True, candle_size=candle_size
                     )
                 else:
                     _update_shared_setup_and_signals(
@@ -345,7 +345,8 @@ def _update_shared_setup_and_signals(
     s_time,
     live_ltp: float | None,
     last_candle_time: dict,
-    is_new_candle: bool = False
+    is_new_candle: bool = False,
+    candle_size: float | None = None
 ):
     with market_cache_lock:
         if is_new_candle:
@@ -358,6 +359,8 @@ def _update_shared_setup_and_signals(
                     "ema": s_ema,
                     "time": s_time
                 }
+                if candle_size is not None:
+                    SHARED_SETUPS[index_name][strategy]["candle_size"] = candle_size
                 logging.info(f"[MARKET ENGINE] Setup detected for {index_name} {strategy} at low {s_low}")
             else:
                 logging.info(f"[MARKET ENGINE] No setup detected for {index_name} {strategy} on new candle")

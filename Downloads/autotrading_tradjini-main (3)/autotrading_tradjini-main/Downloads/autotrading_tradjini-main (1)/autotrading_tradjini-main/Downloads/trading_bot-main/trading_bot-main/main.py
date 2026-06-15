@@ -530,11 +530,11 @@ def _run_bot_logic(user_config: dict) -> None:
                                 target_points = user_target
                             else:
                                 if user_strategy == "strategy_two":
-                                    # Strategy Two specific logic
-                                    # If candle size is less than 20 points (e.g. 14, 19), use it as SL.
-                                    # If candle size is 20 points or greater, SL is fixed to 20 points.
-                                    sl_points = candle_range if candle_range < 20 else 20
+                                    candle_size_val = setup.get("candle_size", candle_range)
+                                    sl_points = min(candle_size_val, 20)
                                     target_points = 2 * sl_points
+                                    add_log(user_id, f"Strategy Two Setup Candle Size: {candle_size_val:.2f}")
+                                    add_log(user_id, f"Strategy Two SL Points: {sl_points:.2f}")
                                 else:
                                     # Strategy One default logic
                                     sl_points = min(candle_range, 20)
@@ -581,16 +581,22 @@ def _run_bot_logic(user_config: dict) -> None:
                                         add_log(user_id, f"✅ BUY executed at {executed_price:.2f} | Order: {buy_order_id}")
 
                                         # ── 4. Calculate Premium SL/Target ──────────────
-                                        if user_strategy == "strategy_one":
-                                            opt_sl_pts = 20
-                                            opt_tgt_pts = 40
-                                        elif user_strategy == "strategy_two":
-                                            candle_range = setup['high'] - setup['low']
-                                            opt_sl_pts = candle_range if candle_range < 20 else 20
-                                            opt_tgt_pts = opt_sl_pts * 2
+                                        if user_mode == "custom":
+                                            opt_sl_pts = user_sl
+                                            opt_tgt_pts = user_target
                                         else:
-                                            opt_sl_pts = 20
-                                            opt_tgt_pts = 40
+                                            if user_strategy == "strategy_one":
+                                                opt_sl_pts = 20
+                                                opt_tgt_pts = 40
+                                            elif user_strategy == "strategy_two":
+                                                candle_size_val = setup.get("candle_size", setup['high'] - setup['low'])
+                                                opt_sl_pts = min(candle_size_val, 20)
+                                                opt_tgt_pts = opt_sl_pts * 2
+                                                add_log(user_id, f"Strategy Two Setup Candle Size: {candle_size_val:.2f}")
+                                                add_log(user_id, f"Strategy Two SL Points: {opt_sl_pts:.2f}")
+                                            else:
+                                                opt_sl_pts = 20
+                                                opt_tgt_pts = 40
 
                                         opt_sl_price = round(executed_price - opt_sl_pts, 2)
                                         opt_target_price = round(executed_price + opt_tgt_pts, 2)
