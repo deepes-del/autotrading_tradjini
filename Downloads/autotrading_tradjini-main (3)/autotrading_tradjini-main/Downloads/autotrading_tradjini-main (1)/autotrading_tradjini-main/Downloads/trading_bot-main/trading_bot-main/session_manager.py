@@ -358,11 +358,12 @@ def get_cached_user_status(user_id: str) -> dict | None:
 def update_cached_user_status(user_id: str, status: str | None = None, bot_running: bool | None = None) -> None:
     with user_status_lock:
         if user_id not in USER_STATUS_CACHE:
-            USER_STATUS_CACHE[user_id] = {"status": "approved", "bot_running": False}
+            USER_STATUS_CACHE[user_id] = {"status": "approved", "bot_running": False, "local_update_time": 0.0}
         if status is not None:
             USER_STATUS_CACHE[user_id]["status"] = status
         if bot_running is not None:
             USER_STATUS_CACHE[user_id]["bot_running"] = bot_running
+        USER_STATUS_CACHE[user_id]["local_update_time"] = time.time()
 
 def start_user_status_sync_loop():
     global _status_sync_started
@@ -390,8 +391,27 @@ def _user_status_sync_loop():
                             "bot_running": row.get("bot_running", False)
                         }
                 with user_status_lock:
-                    USER_STATUS_CACHE.clear()
-                    USER_STATUS_CACHE.update(new_cache)
+                    # Remove deleted users from cache
+                    keys_to_remove = [uid for uid in USER_STATUS_CACHE if uid not in new_cache]
+                    for uid in keys_to_remove:
+                        USER_STATUS_CACHE.pop(uid, None)
+                    
+                    # Update cache selectively, respecting recent local updates
+                    now = time.time()
+                    for uid, db_val in new_cache.items():
+                        cached_val = USER_STATUS_CACHE.get(uid)
+                        if cached_val is not None:
+                            # Only overwrite status and bot_running if no local update occurred in the last 15 seconds
+                            if now - cached_val.get("local_update_time", 0.0) > 15.0:
+                                USER_STATUS_CACHE[uid]["status"] = db_val["status"]
+                                USER_STATUS_CACHE[uid]["bot_running"] = db_val["bot_running"]
+                        else:
+                            # New user
+                            USER_STATUS_CACHE[uid] = {
+                                "status": db_val["status"],
+                                "bot_running": db_val["bot_running"],
+                                "local_update_time": 0.0
+                            }
         except Exception as e:
             logging.error(f"[USER_STATUS_SYNC] Error in user status sync: {e}")
         time.sleep(20)

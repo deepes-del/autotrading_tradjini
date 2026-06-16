@@ -442,12 +442,16 @@ def start_bot_api(config: BotConfig):
     if not session:
         raise HTTPException(status_code=400, detail="Broker not connected. Please connect first.")
 
+    # Synchronously update bot status to True in DB and cache BEFORE starting the thread
+    update_bot_status(user_id, True)
+
     started = start_bot(user_id, user_config)
 
     if started:
-        update_bot_status(user_id, True)
         return {"status": "Bot started", "user_id": user_id}
     else:
+        # Revert status if bot failed to start
+        update_bot_status(user_id, False)
         return {"error": "Bot is already running for this user"}
 
 
@@ -635,11 +639,15 @@ def admin_start_bot(req: AdminActionReq):
         "stop_requested": False,
     }
 
+    # Synchronously update bot status to True in DB and cache BEFORE starting the thread
+    update_bot_status(req.user_id, True)
+
     started = start_bot(req.user_id, user_config)
     if started:
-        update_bot_status(req.user_id, True)
         return {"status": f"Bot started for {req.user_id}"}
-    return {"error": "Bot already running"}
+    else:
+        update_bot_status(req.user_id, False)
+        return {"error": "Bot already running"}
 
 
 # ── Admin helpers ──────────────────────────────────────────
