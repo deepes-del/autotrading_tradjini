@@ -206,6 +206,8 @@ def _run_bot_wrapper(user_config: dict) -> None:
             supabase_retry(
                 lambda: supabase.table("users").update({"bot_running": False}).eq("user_id", user_id).execute()
             )
+            import session_manager
+            session_manager.update_cached_user_status(user_id, bot_running=False)
         except Exception as db_e:
             logging.error(f"[BOT] DB update failed on exit: {db_e}")
         print(f"[BOT] Thread exited for user: {user_id}")

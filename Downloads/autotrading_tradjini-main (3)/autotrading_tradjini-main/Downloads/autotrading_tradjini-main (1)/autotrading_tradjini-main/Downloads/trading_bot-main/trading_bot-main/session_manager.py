@@ -339,10 +339,10 @@ def _disable_trading(user_id: str):
         
     try:
         supabase.table("users").update({"bot_running": False}).eq("user_id", user_id).execute()
+        update_cached_user_status(user_id, bot_running=False)
         logging.info(f"[AUTO LOGIN] Trading disabled and bot stopped for User: {user_id}")
     except Exception as exc:
         logging.error(f"[AUTO LOGIN] Failed to update users table to stop bot: {exc}")
-
 
 # ── Central User Status Caching ─────────────────────────────────────────────
 
@@ -354,6 +354,15 @@ _status_sync_lock = threading.Lock()
 def get_cached_user_status(user_id: str) -> dict | None:
     with user_status_lock:
         return USER_STATUS_CACHE.get(user_id)
+
+def update_cached_user_status(user_id: str, status: str | None = None, bot_running: bool | None = None) -> None:
+    with user_status_lock:
+        if user_id not in USER_STATUS_CACHE:
+            USER_STATUS_CACHE[user_id] = {"status": "approved", "bot_running": False}
+        if status is not None:
+            USER_STATUS_CACHE[user_id]["status"] = status
+        if bot_running is not None:
+            USER_STATUS_CACHE[user_id]["bot_running"] = bot_running
 
 def start_user_status_sync_loop():
     global _status_sync_started

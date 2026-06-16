@@ -374,6 +374,8 @@ def update_bot_status(user_id: str, is_running: bool):
         supabase_retry(
             lambda: supabase.table("users").update({"bot_running": is_running}).eq("user_id", user_id).execute()
         )
+        import session_manager
+        session_manager.update_cached_user_status(user_id, bot_running=is_running)
     except Exception as e:
         logging.error(f"Error updating bot status: {e}")
 
@@ -605,6 +607,8 @@ def admin_approve(req: AdminActionReq):
         supabase_retry(
             lambda: supabase.table("users").update({"status": "approved"}).eq("user_id", req.user_id).execute()
         )
+        import session_manager
+        session_manager.update_cached_user_status(req.user_id, status="approved")
         return {"status": f"User {req.user_id} approved"}
     except Exception as e:
         return {"error": str(e)}
@@ -649,12 +653,14 @@ def _stop_user_bot(user_id: str) -> bool:
     from supabase_client import supabase_retry
     from main import running_bots
     bot = running_bots.get(user_id)
+    import session_manager
     if bot:
         bot["config"]["stop_requested"] = True
         try:
             supabase_retry(
                 lambda: supabase.table("users").update({"bot_running": False}).eq("user_id", user_id).execute()
             )
+            session_manager.update_cached_user_status(user_id, bot_running=False)
         except Exception as e:
             logging.error(f"[ADMIN] Supabase update failed on stop-bot for {user_id}: {e}")
         logging.info(f"[ADMIN] Stop signal sent to bot for user {user_id}")
@@ -664,6 +670,7 @@ def _stop_user_bot(user_id: str) -> bool:
         supabase_retry(
             lambda: supabase.table("users").update({"bot_running": False}).eq("user_id", user_id).execute()
         )
+        session_manager.update_cached_user_status(user_id, bot_running=False)
     except Exception:
         pass
     return False
@@ -706,6 +713,8 @@ def admin_disapprove_user(req: AdminActionReq):
                 {"status": "blocked", "bot_running": False}
             ).eq("user_id", req.user_id).execute()
         )
+        import session_manager
+        session_manager.update_cached_user_status(req.user_id, status="blocked", bot_running=False)
         logging.info(f"[ADMIN] User {req.user_id} blocked.")
         return {"status": f"User {req.user_id} blocked", "bot": "stopped"}
     except Exception as e:
@@ -728,6 +737,9 @@ def admin_delete_user(req: AdminActionReq):
         supabase_retry(
             lambda: supabase.table("users").delete().eq("user_id", req.user_id).execute()
         )
+        import session_manager
+        with session_manager.user_status_lock:
+            session_manager.USER_STATUS_CACHE.pop(req.user_id, None)
         logging.info(f"[ADMIN] User {req.user_id} deleted.")
         return {"status": f"User {req.user_id} deleted successfully"}
     except Exception as e:
