@@ -565,7 +565,10 @@ def _run_bot_logic(user_config: dict) -> None:
                                         add_log(user_id, f"✅ BUY executed at {executed_price:.2f} | Order: {buy_order_id}")
 
                                         # ── 4. Calculate Premium SL/Target ──────────────
-                                        if user_mode == "custom":
+                                        if user_strategy == "strategy_three":
+                                            opt_sl_pts = 10
+                                            opt_tgt_pts = 40
+                                        elif user_mode == "custom":
                                             opt_sl_pts = user_sl
                                             opt_tgt_pts = user_target
                                         else:

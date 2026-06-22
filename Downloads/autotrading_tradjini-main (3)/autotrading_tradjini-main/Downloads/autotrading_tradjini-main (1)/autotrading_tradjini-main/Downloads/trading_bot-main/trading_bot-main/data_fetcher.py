@@ -494,6 +494,11 @@ def _market_data_engine_loop():
                                     if len(opt_df_trimmed) >= 22:
                                         opt_df_trimmed['EMA21'] = strategy_three.calculate_ema21(opt_df_trimmed)
                                         last_candle = opt_df_trimmed.iloc[-1]
+                                        last_ts = last_candle['timestamp_ist']
+                                        
+                                        if state.get("last_failed_setup_timestamp") == last_ts:
+                                            continue
+                                            
                                         last_ema = float(last_candle['EMA21'])
                                         
                                         if opt_type == "CE":
@@ -503,7 +508,8 @@ def _market_data_engine_loop():
                                             
                                         if setup_match:
                                             state["state"] = "WAIT_CONFIRMATION"
-                                            state["setup_timestamp"] = last_candle['timestamp_ist']
+                                            state["setup_timestamp"] = last_ts
+                                            state["setup_ema"] = last_ema
                                             state["locked_strike"] = atm_strike
                                             state["locked_token"] = opt_token
                                             state["locked_symbol"] = opt_symbol
@@ -511,56 +517,36 @@ def _market_data_engine_loop():
                                             state["signal_time"] = None
                                             state["trade_entered"] = False
                                             
-                                            broadcast_strategy_three_log(f"🧠 Setup Detected | {index_name} {opt_type} at {last_candle['timestamp_ist'].strftime('%H:%M')} (Option: {opt_symbol})")
+                                            broadcast_strategy_three_log(f"🧠 Setup Detected | {index_name} {opt_type} at {last_ts.strftime('%H:%M')} (Option: {opt_symbol})")
                                             
                                 elif state["state"] == "WAIT_CONFIRMATION":
                                     opt_token = state["locked_token"]
                                     opt_symbol = state["locked_symbol"]
                                     atm_strike = state["locked_strike"]
+                                    setup_ts = state["setup_timestamp"]
+                                    setup_ema = state["setup_ema"]
                                     
                                     opt_df = get_cached_option_candles(user_id, opt_token, latest_ts)
                                     if opt_df is None or opt_df.empty:
                                         continue
                                     
-                                    now_kolkata = datetime.datetime.now(pytz.timezone('Asia/Kolkata'))
-                                    last_candle_ts = opt_df['timestamp_ist'].iloc[-1]
-                                    if now_kolkata < (last_candle_ts + datetime.timedelta(minutes=5)):
-                                        opt_forming = opt_df.iloc[-1]
-                                        opt_df_trimmed = opt_df.iloc[:-1].copy()
-                                    else:
-                                        opt_forming = None
-                                        opt_df_trimmed = opt_df.copy()
-                                        
-                                    if len(opt_df_trimmed) >= 22:
-                                        opt_df_trimmed['EMA21'] = strategy_three.calculate_ema21(opt_df_trimmed)
-                                        last_candle = opt_df_trimmed.iloc[-1]
-                                        last_ts = last_candle['timestamp_ist']
-                                        
-                                        if last_ts == state["setup_timestamp"]:
-                                            pass
-                                        elif len(opt_df_trimmed) >= 2 and opt_df_trimmed.iloc[-2]['timestamp_ist'] == state["setup_timestamp"]:
-                                            conf_candle = last_candle
-                                            conf_ema = float(conf_candle['EMA21'])
+                                    last_ts = opt_df['timestamp_ist'].iloc[-1]
+                                    if last_ts >= setup_ts + datetime.timedelta(minutes=5):
+                                        if state.get("evaluated_open_timestamp") != last_ts:
+                                            state["evaluated_open_timestamp"] = last_ts
                                             
+                                            open_price = float(opt_df['open'].iloc[-1])
+                                            
+                                            trigger_signal = False
                                             if opt_type == "CE":
-                                                conf_valid = strategy_three.check_confirmation_ce(float(conf_candle['open']), float(conf_candle['low']), conf_ema)
-                                            else:
-                                                conf_valid = strategy_three.check_confirmation_pe(float(conf_candle['open']), float(conf_candle['high']), conf_ema)
-                                                
-                                            if conf_valid:
-                                                broadcast_strategy_three_log(f"✅ Confirmation Detected | {index_name} {opt_type}")
-                                                
-                                                if opt_forming is not None:
-                                                    entry_price = float(opt_forming['open'])
-                                                else:
-                                                    entry_price = get_ltp(user_id, "NFO", opt_symbol, opt_token)
-                                                    if entry_price is None:
-                                                        entry_price = float(conf_candle['close'])
-                                                        
-                                                sl_price = round(entry_price - 10, 2)
-                                                target_price = round(entry_price + 40, 2)
-                                                
-                                                broadcast_strategy_three_log(f"🔥 Signal Generated | {index_name} {opt_type} | Strike: {atm_strike} | Entry: {entry_price:.2f} | SL: {sl_price:.2f} | Tgt: {target_price:.2f}")
+                                                if open_price > setup_ema:
+                                                    trigger_signal = True
+                                            else: # PE
+                                                if open_price < setup_ema:
+                                                    trigger_signal = True
+                                                    
+                                            if trigger_signal:
+                                                broadcast_strategy_three_log(f"🔥 Signal Generated | {index_name} {opt_type} | Strike: {atm_strike} | Entry: {open_price:.2f} | SL: {open_price - 10:.2f} | Tgt: {open_price + 40:.2f}")
                                                 
                                                 with market_cache_lock:
                                                     SHARED_SIGNALS[index_name]["strategy_three"] = {
@@ -569,54 +555,36 @@ def _market_data_engine_loop():
                                                         "option_symbol": opt_symbol,
                                                         "option_token": opt_token,
                                                         "atm_strike": atm_strike,
-                                                        "entry_price": entry_price,
-                                                        "stoploss": sl_price,
-                                                        "target": target_price,
+                                                        "entry_price": open_price,
+                                                        "stoploss": open_price - 10,
+                                                        "target": open_price + 40,
                                                         "signal_timestamp": time.time(),
                                                         "timestamp": time.time(),
                                                         "opt_tok": opt_token,
                                                         "opt_sym": opt_symbol,
-                                                        "option_ltp": entry_price,
+                                                        "option_ltp": open_price,
                                                         "setup": {
-                                                            "time": state["setup_timestamp"],
-                                                            "low": float(opt_df_trimmed.iloc[-2]['low']),
-                                                            "high": float(opt_df_trimmed.iloc[-2]['high']),
-                                                            "ema": float(opt_df_trimmed.iloc[-2]['EMA21'])
+                                                            "time": setup_ts,
+                                                            "ema": setup_ema
                                                         }
                                                     }
-                                                    
+                                                
                                                 state["state"] = "TRADE_ACTIVE"
                                                 state["signal_generated"] = True
                                                 state["signal_time"] = time.time()
                                                 state["trade_entered"] = False
                                             else:
-                                                last_ema = float(last_candle['EMA21'])
-                                                if opt_type == "CE":
-                                                    setup_match = strategy_three.check_setup_ce(float(last_candle['low']), float(last_candle['close']), last_ema)
-                                                else:
-                                                    setup_match = strategy_three.check_setup_pe(float(last_candle['high']), float(last_candle['close']), last_ema)
-                                                    
-                                                if setup_match:
-                                                    state["setup_timestamp"] = last_ts
-                                                    broadcast_strategy_three_log(f"🧠 Setup Detected | {index_name} {opt_type} at {last_ts.strftime('%H:%M')} (Option: {opt_symbol})")
-                                                else:
-                                                    state["state"] = "WAIT_SETUP"
-                                                    state["setup_timestamp"] = None
-                                                    state["locked_strike"] = None
-                                                    state["locked_token"] = None
-                                                    state["locked_symbol"] = None
-                                                    state["signal_generated"] = False
-                                                    state["signal_time"] = None
-                                                    state["trade_entered"] = False
-                                        else:
-                                            state["state"] = "WAIT_SETUP"
-                                            state["setup_timestamp"] = None
-                                            state["locked_strike"] = None
-                                            state["locked_token"] = None
-                                            state["locked_symbol"] = None
-                                            state["signal_generated"] = False
-                                            state["signal_time"] = None
-                                            state["trade_entered"] = False
+                                                broadcast_strategy_three_log(f"❌ Next candle open ({open_price:.2f}) did not trigger for {index_name} {opt_type}. Resetting setup.")
+                                                state["state"] = "WAIT_SETUP"
+                                                state["last_failed_setup_timestamp"] = setup_ts
+                                                state["setup_timestamp"] = None
+                                                state["setup_ema"] = None
+                                                state["locked_strike"] = None
+                                                state["locked_token"] = None
+                                                state["locked_symbol"] = None
+                                                state["signal_generated"] = False
+                                                state["signal_time"] = None
+                                                state["trade_entered"] = False
                                             
                                 elif state["state"] == "TRADE_ACTIVE":
                                     is_active = is_strategy_three_trade_active(index_name, opt_type)
