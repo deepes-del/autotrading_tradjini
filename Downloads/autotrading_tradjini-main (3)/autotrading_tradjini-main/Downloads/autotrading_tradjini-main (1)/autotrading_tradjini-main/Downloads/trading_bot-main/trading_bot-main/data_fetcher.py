@@ -20,6 +20,7 @@ import time
 import yfinance as yf
 import config
 import threading
+import strategy_three
 
 BASE_URL = "https://api.tradejini.com/v2"
 
@@ -62,22 +63,77 @@ MARKET_LTP_CACHE = {
 SHARED_SETUPS = {
     "NIFTY": {
         "strategy_one": None,
-        "strategy_two": None
+        "strategy_two": None,
+        "strategy_three": None
     },
     "BANKNIFTY": {
         "strategy_one": None,
-        "strategy_two": None
+        "strategy_two": None,
+        "strategy_three": None
     }
 }
 
 SHARED_SIGNALS = {
     "NIFTY": {
         "strategy_one": None,
-        "strategy_two": None
+        "strategy_two": None,
+        "strategy_three": None
     },
     "BANKNIFTY": {
         "strategy_one": None,
-        "strategy_two": None
+        "strategy_two": None,
+        "strategy_three": None
+    }
+}
+
+STRATEGY_THREE_STATE = {
+    "NIFTY": {
+        "CE": {
+            "state": "WAIT_SETUP",
+            "setup_timestamp": None,
+            "confirmation_timestamp": None,
+            "signal_generated": False,
+            "signal_time": None,
+            "locked_strike": None,
+            "locked_token": None,
+            "locked_symbol": None,
+            "trade_entered": False
+        },
+        "PE": {
+            "state": "WAIT_SETUP",
+            "setup_timestamp": None,
+            "confirmation_timestamp": None,
+            "signal_generated": False,
+            "signal_time": None,
+            "locked_strike": None,
+            "locked_token": None,
+            "locked_symbol": None,
+            "trade_entered": False
+        }
+    },
+    "BANKNIFTY": {
+        "CE": {
+            "state": "WAIT_SETUP",
+            "setup_timestamp": None,
+            "confirmation_timestamp": None,
+            "signal_generated": False,
+            "signal_time": None,
+            "locked_strike": None,
+            "locked_token": None,
+            "locked_symbol": None,
+            "trade_entered": False
+        },
+        "PE": {
+            "state": "WAIT_SETUP",
+            "setup_timestamp": None,
+            "confirmation_timestamp": None,
+            "signal_generated": False,
+            "signal_time": None,
+            "locked_strike": None,
+            "locked_token": None,
+            "locked_symbol": None,
+            "trade_entered": False
+        }
     }
 }
 
@@ -89,6 +145,43 @@ _engine_lock = threading.Lock()
 OPTION_LTP_CACHE = {}         # token -> {"price": float, "updated_at": float}
 ACTIVE_OPTION_TOKENS = {}     # token -> {"symbol": str, "last_requested": float}
 option_cache_lock = threading.Lock()
+
+OPTION_CANDLE_CACHE = {}      # token -> {"index_candle_ts": datetime, "df": DataFrame}
+option_candle_cache_lock = threading.Lock()
+
+
+def get_cached_option_candles(user_id: str, token: str, index_latest_ts) -> pd.DataFrame:
+    with option_candle_cache_lock:
+        cached = OPTION_CANDLE_CACHE.get(token)
+        if cached is not None and cached.get("index_candle_ts") == index_latest_ts:
+            return cached["df"]
+    
+    df = fetch_option_candles(user_id, token)
+    if df is not None and not df.empty:
+        with option_candle_cache_lock:
+            OPTION_CANDLE_CACHE[token] = {
+                "index_candle_ts": index_latest_ts,
+                "df": df
+            }
+    return df
+
+
+def is_strategy_three_trade_active(index_name: str, opt_type: str) -> bool:
+    try:
+        import main
+        with main.bot_lock:
+            for u_id, bot_info in list(main.running_bots.items()):
+                cfg = bot_info.get("config", {})
+                if cfg.get("strategy") == "strategy_three" and cfg.get("index") == index_name:
+                    active_trade = bot_info.get("active_trade")
+                    if active_trade is not None:
+                        state = STRATEGY_THREE_STATE[index_name][opt_type]
+                        if active_trade.get("opt_tok") == state["locked_token"]:
+                            return True
+    except Exception as e:
+        logging.error(f"Error in is_strategy_three_trade_active: {e}")
+    return False
+
 
 
 def start_market_data_engine():
@@ -221,6 +314,26 @@ def _market_data_engine_loop():
         try:
             time.sleep(5)
 
+            # Get active indices from running bots and ongoing strategy sequences
+            active_indices = set()
+            try:
+                import main
+                with main.bot_lock:
+                    for u_id, bot_info in list(main.running_bots.items()):
+                        cfg = bot_info.get("config", {})
+                        idx = cfg.get("index")
+                        if idx:
+                            active_indices.add(idx.upper())
+            except Exception as e:
+                logging.error(f"Error checking active bot indices: {e}")
+
+            for idx_name in ["NIFTY", "BANKNIFTY"]:
+                if any(STRATEGY_THREE_STATE[idx_name][ot]["state"] != "WAIT_SETUP" for ot in ["CE", "PE"]):
+                    active_indices.add(idx_name)
+
+            if not active_indices:
+                continue
+
             # Central fetch log
             logging.info(
                 f"[YFINANCE FETCH]\n\n"
@@ -232,8 +345,10 @@ def _market_data_engine_loop():
             ist = pytz.timezone('Asia/Kolkata')
             now = datetime.datetime.now(ist)
 
-            # Fetch NIFTY & BANKNIFTY
+            # Fetch NIFTY & BANKNIFTY (active only)
             for index_name, ticker in [("NIFTY", "^NSEI"), ("BANKNIFTY", "^NSEBANK")]:
+                if index_name not in active_indices:
+                    continue
                 df_5m_new = safe_yf_download(ticker, interval="5m", period="1d")
                 df_1m = safe_yf_download(ticker, interval="1m", period="1d")
 
@@ -296,6 +411,8 @@ def _market_data_engine_loop():
 
             # Central strategy check
             for index_name in ["NIFTY", "BANKNIFTY"]:
+                if index_name not in active_indices:
+                    continue
                 with market_cache_lock:
                     df = MARKET_DATA_CACHE[index_name]
                     live_ltp = MARKET_LTP_CACHE[index_name]
@@ -330,6 +447,207 @@ def _market_data_engine_loop():
                     _update_shared_setup_and_signals(
                         index_name, "strategy_two", None, None, None, None, latest_ts, live_ltp, last_candle_time, is_new_candle=False
                     )
+
+                # Strategy Three (Centralized Option EMA21 Strategy)
+                is_idx_active = False
+                try:
+                    import main
+                    with main.bot_lock:
+                        for u_id, bot_info in list(main.running_bots.items()):
+                            cfg = bot_info.get("config", {})
+                            if cfg.get("strategy") == "strategy_three" and cfg.get("index", "").upper() == index_name:
+                                is_idx_active = True
+                                break
+                except Exception:
+                    pass
+
+                if not is_idx_active:
+                    if any(STRATEGY_THREE_STATE[index_name][ot]["state"] != "WAIT_SETUP" for ot in ["CE", "PE"]):
+                        is_idx_active = True
+
+                if is_idx_active:
+                    import order_manager
+                    user_id = order_manager._get_any_active_user_id()
+                    if user_id and live_ltp is not None:
+                        try:
+                            for opt_type in ["CE", "PE"]:
+                                state = STRATEGY_THREE_STATE[index_name][opt_type]
+                                
+                                if state["state"] == "WAIT_SETUP":
+                                    step = 50 if index_name == "NIFTY" else 100
+                                    atm_strike = round(live_ltp / step) * step
+                                    opt_token, opt_symbol = get_option_token_symbol(index_name, atm_strike, opt_type)
+                                    if not opt_token:
+                                        continue
+                                    
+                                    opt_df = get_cached_option_candles(user_id, opt_token, latest_ts)
+                                    if opt_df is None or opt_df.empty:
+                                        continue
+                                    
+                                    now_kolkata = datetime.datetime.now(pytz.timezone('Asia/Kolkata'))
+                                    last_candle_ts = opt_df['timestamp_ist'].iloc[-1]
+                                    if now_kolkata < (last_candle_ts + datetime.timedelta(minutes=5)):
+                                        opt_df_trimmed = opt_df.iloc[:-1].copy()
+                                    else:
+                                        opt_df_trimmed = opt_df.copy()
+                                        
+                                    if len(opt_df_trimmed) >= 22:
+                                        opt_df_trimmed['EMA21'] = strategy_three.calculate_ema21(opt_df_trimmed)
+                                        last_candle = opt_df_trimmed.iloc[-1]
+                                        last_ema = float(last_candle['EMA21'])
+                                        
+                                        if opt_type == "CE":
+                                            setup_match = strategy_three.check_setup_ce(float(last_candle['low']), float(last_candle['close']), last_ema)
+                                        else:
+                                            setup_match = strategy_three.check_setup_pe(float(last_candle['high']), float(last_candle['close']), last_ema)
+                                            
+                                        if setup_match:
+                                            state["state"] = "WAIT_CONFIRMATION"
+                                            state["setup_timestamp"] = last_candle['timestamp_ist']
+                                            state["locked_strike"] = atm_strike
+                                            state["locked_token"] = opt_token
+                                            state["locked_symbol"] = opt_symbol
+                                            state["signal_generated"] = False
+                                            state["signal_time"] = None
+                                            state["trade_entered"] = False
+                                            
+                                            broadcast_strategy_three_log(f"🧠 Setup Detected | {index_name} {opt_type} at {last_candle['timestamp_ist'].strftime('%H:%M')} (Option: {opt_symbol})")
+                                            
+                                elif state["state"] == "WAIT_CONFIRMATION":
+                                    opt_token = state["locked_token"]
+                                    opt_symbol = state["locked_symbol"]
+                                    atm_strike = state["locked_strike"]
+                                    
+                                    opt_df = get_cached_option_candles(user_id, opt_token, latest_ts)
+                                    if opt_df is None or opt_df.empty:
+                                        continue
+                                    
+                                    now_kolkata = datetime.datetime.now(pytz.timezone('Asia/Kolkata'))
+                                    last_candle_ts = opt_df['timestamp_ist'].iloc[-1]
+                                    if now_kolkata < (last_candle_ts + datetime.timedelta(minutes=5)):
+                                        opt_forming = opt_df.iloc[-1]
+                                        opt_df_trimmed = opt_df.iloc[:-1].copy()
+                                    else:
+                                        opt_forming = None
+                                        opt_df_trimmed = opt_df.copy()
+                                        
+                                    if len(opt_df_trimmed) >= 22:
+                                        opt_df_trimmed['EMA21'] = strategy_three.calculate_ema21(opt_df_trimmed)
+                                        last_candle = opt_df_trimmed.iloc[-1]
+                                        last_ts = last_candle['timestamp_ist']
+                                        
+                                        if last_ts == state["setup_timestamp"]:
+                                            pass
+                                        elif len(opt_df_trimmed) >= 2 and opt_df_trimmed.iloc[-2]['timestamp_ist'] == state["setup_timestamp"]:
+                                            conf_candle = last_candle
+                                            conf_ema = float(conf_candle['EMA21'])
+                                            
+                                            if opt_type == "CE":
+                                                conf_valid = strategy_three.check_confirmation_ce(float(conf_candle['open']), float(conf_candle['low']), conf_ema)
+                                            else:
+                                                conf_valid = strategy_three.check_confirmation_pe(float(conf_candle['open']), float(conf_candle['high']), conf_ema)
+                                                
+                                            if conf_valid:
+                                                broadcast_strategy_three_log(f"✅ Confirmation Detected | {index_name} {opt_type}")
+                                                
+                                                if opt_forming is not None:
+                                                    entry_price = float(opt_forming['open'])
+                                                else:
+                                                    entry_price = get_ltp(user_id, "NFO", opt_symbol, opt_token)
+                                                    if entry_price is None:
+                                                        entry_price = float(conf_candle['close'])
+                                                        
+                                                sl_price = round(entry_price - 10, 2)
+                                                target_price = round(entry_price + 40, 2)
+                                                
+                                                broadcast_strategy_three_log(f"🔥 Signal Generated | {index_name} {opt_type} | Strike: {atm_strike} | Entry: {entry_price:.2f} | SL: {sl_price:.2f} | Tgt: {target_price:.2f}")
+                                                
+                                                with market_cache_lock:
+                                                    SHARED_SIGNALS[index_name]["strategy_three"] = {
+                                                        "strategy_name": "strategy_three",
+                                                        "signal_type": opt_type,
+                                                        "option_symbol": opt_symbol,
+                                                        "option_token": opt_token,
+                                                        "atm_strike": atm_strike,
+                                                        "entry_price": entry_price,
+                                                        "stoploss": sl_price,
+                                                        "target": target_price,
+                                                        "signal_timestamp": time.time(),
+                                                        "timestamp": time.time(),
+                                                        "opt_tok": opt_token,
+                                                        "opt_sym": opt_symbol,
+                                                        "option_ltp": entry_price,
+                                                        "setup": {
+                                                            "time": state["setup_timestamp"],
+                                                            "low": float(opt_df_trimmed.iloc[-2]['low']),
+                                                            "high": float(opt_df_trimmed.iloc[-2]['high']),
+                                                            "ema": float(opt_df_trimmed.iloc[-2]['EMA21'])
+                                                        }
+                                                    }
+                                                    
+                                                state["state"] = "TRADE_ACTIVE"
+                                                state["signal_generated"] = True
+                                                state["signal_time"] = time.time()
+                                                state["trade_entered"] = False
+                                            else:
+                                                last_ema = float(last_candle['EMA21'])
+                                                if opt_type == "CE":
+                                                    setup_match = strategy_three.check_setup_ce(float(last_candle['low']), float(last_candle['close']), last_ema)
+                                                else:
+                                                    setup_match = strategy_three.check_setup_pe(float(last_candle['high']), float(last_candle['close']), last_ema)
+                                                    
+                                                if setup_match:
+                                                    state["setup_timestamp"] = last_ts
+                                                    broadcast_strategy_three_log(f"🧠 Setup Detected | {index_name} {opt_type} at {last_ts.strftime('%H:%M')} (Option: {opt_symbol})")
+                                                else:
+                                                    state["state"] = "WAIT_SETUP"
+                                                    state["setup_timestamp"] = None
+                                                    state["locked_strike"] = None
+                                                    state["locked_token"] = None
+                                                    state["locked_symbol"] = None
+                                                    state["signal_generated"] = False
+                                                    state["signal_time"] = None
+                                                    state["trade_entered"] = False
+                                        else:
+                                            state["state"] = "WAIT_SETUP"
+                                            state["setup_timestamp"] = None
+                                            state["locked_strike"] = None
+                                            state["locked_token"] = None
+                                            state["locked_symbol"] = None
+                                            state["signal_generated"] = False
+                                            state["signal_time"] = None
+                                            state["trade_entered"] = False
+                                            
+                                elif state["state"] == "TRADE_ACTIVE":
+                                    is_active = is_strategy_three_trade_active(index_name, opt_type)
+                                    if is_active:
+                                        if not state["trade_entered"]:
+                                            state["trade_entered"] = True
+                                            broadcast_strategy_three_log(f"✅ Trade Entered | {index_name} {opt_type} (Option: {state['locked_symbol']})")
+                                    else:
+                                        should_reset = False
+                                        if state["trade_entered"]:
+                                            broadcast_strategy_three_log(f"🛑 Trade Exited | {index_name} {opt_type} (Option: {state['locked_symbol']})")
+                                            should_reset = True
+                                        elif state["signal_time"] is not None and (time.time() - state["signal_time"] > 60):
+                                            broadcast_strategy_three_log(f"⏳ Signal Timeout | {index_name} {opt_type} signal expired after 60s")
+                                            should_reset = True
+                                            
+                                        if should_reset:
+                                            with market_cache_lock:
+                                                if SHARED_SIGNALS.get(index_name, {}).get("strategy_three") is not None:
+                                                    SHARED_SIGNALS[index_name]["strategy_three"] = None
+                                                    
+                                            state["state"] = "WAIT_SETUP"
+                                            state["setup_timestamp"] = None
+                                            state["locked_strike"] = None
+                                            state["locked_token"] = None
+                                            state["locked_symbol"] = None
+                                            state["signal_generated"] = False
+                                            state["signal_time"] = None
+                                            state["trade_entered"] = False
+                        except Exception as ex:
+                            logging.error(f"[STRATEGY THREE ERROR] Exception: {ex}", exc_info=True)
 
         except Exception as err:
             logging.error(f"[MARKET ENGINE] Error in loop: {err}", exc_info=True)
@@ -804,3 +1122,97 @@ def get_ltp(
                 }
             return float(ltp)
         return None
+
+
+# ── Strategy Three helpers ────────────────────────────────────
+
+def fetch_option_candles(user_id: str, symboltoken: str, interval: str = "5") -> pd.DataFrame:
+    now_ts = int(time.time())
+    # 2 days of history to seed EMA21 correctly
+    from_ts = now_ts - 172800 
+
+    url = f"{BASE_URL}/api/mkt-data/chart/interval-data"
+    params = {
+        "id": symboltoken,
+        "interval": interval,
+        "from": from_ts,
+        "to": now_ts
+    }
+    
+    delays = [2, 5]
+    for attempt in range(1, 4):
+        try:
+            _log_auth_check(user_id, "market_data")
+            response = requests.get(url, headers=_headers(user_id), params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if not data or data.get("s") == "no-data":
+                    return pd.DataFrame()
+                res_d = data.get("d", {})
+                bars = res_d.get("bars", [])
+                if not bars:
+                    return pd.DataFrame()
+                
+                df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume', 'oi'])
+                df['timestamp_ist'] = pd.to_datetime(df['time'], unit='ms').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
+                df.set_index('timestamp_ist', inplace=True, drop=False)
+                df = df[['timestamp_ist', 'open', 'high', 'low', 'close', 'volume']]
+                return df
+            elif _is_auth_error(response):
+                logging.warning(f"[SESSION EXPIRED] User: {user_id} in option candle fetch")
+                from session_manager import attempt_broker_auto_login
+                if attempt_broker_auto_login(user_id):
+                    # Retry once with fresh token
+                    response = requests.get(url, headers=_headers(user_id), params=params, timeout=10)
+                    if response.status_code == 200:
+                        data = response.json()
+                        if not data or data.get("s") == "no-data":
+                            return pd.DataFrame()
+                        res_d = data.get("d", {})
+                        bars = res_d.get("bars", [])
+                        if not bars:
+                            return pd.DataFrame()
+                        df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume', 'oi'])
+                        df['timestamp_ist'] = pd.to_datetime(df['time'], unit='ms').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
+                        df.set_index('timestamp_ist', inplace=True, drop=False)
+                        df = df[['timestamp_ist', 'open', 'high', 'low', 'close', 'volume']]
+                        return df
+                _handle_401(user_id, url)
+                break
+        except Exception as e:
+            logging.error(f"[OPTION CANDLES EXCEPTION] token={symboltoken} | attempt={attempt} | {e}")
+        
+        if attempt < 3:
+            time.sleep(delays[attempt - 1])
+            
+    return pd.DataFrame()
+
+
+def get_option_token_symbol(index_name: str, atm_strike: int, opt_type: str) -> tuple:
+    import order_manager
+    key = f"{index_name.upper()}_{int(atm_strike)}_{opt_type.upper()}"
+    with order_manager.instrument_map_lock:
+        entry = order_manager.instrument_map.get(key)
+    if entry is None:
+        step = 50 if index_name.upper() == "NIFTY" else 100
+        fallback_key = order_manager._find_closest_strike(index_name.upper(), int(atm_strike), step, opt_type.upper())
+        if fallback_key:
+            with order_manager.instrument_map_lock:
+                entry = order_manager.instrument_map.get(fallback_key)
+    if entry:
+        return entry["token"], entry["symbol"]
+    return None, None
+
+
+def broadcast_strategy_three_log(message: str) -> None:
+    logging.info(f"[STRATEGY THREE] {message}")
+    try:
+        import main
+        with main.bot_lock:
+            for u_id, bot_info in list(main.running_bots.items()):
+                cfg = bot_info.get("config", {})
+                if cfg.get("strategy") == "strategy_three":
+                    main.add_log(u_id, message)
+    except Exception:
+        pass
+

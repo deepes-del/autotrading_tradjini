@@ -414,26 +414,30 @@ def build_instrument_map(force: bool = False) -> bool:
         logging.error("[INSTRUMENT MAP] No valid NIFTY/BANKNIFTY contracts after parsing")
         return False
 
-    # 5. Find nearest expiry
+    # 5. Find expiries
     expiries = sorted(set(r["expiry"] for r in records_raw))
-    nearest_expiry = expiries[0]
+    nearest_expiry = expiries[0] if expiries else "None"
 
-    # 6. Filter to nearest expiry + strike range ±1500
-    expiry_records = [r for r in records_raw if r["expiry"] == nearest_expiry]
-
+    # 6. Filter to nearest expiry per symbol (load all available strikes)
     new_map: dict[str, dict] = {}
     count = 0
-    for r in expiry_records:
-        spot = nifty_spot if r["symbol"] == "NIFTY" else banknifty_spot
-        if abs(r["strike"] - spot) > 1500:
+    for sym in ("NIFTY", "BANKNIFTY"):
+        sym_records = [r for r in records_raw if r["symbol"] == sym]
+        if not sym_records:
             continue
-        key = f"{r['symbol']}_{int(r['strike'])}_{r['option_type']}"
-        new_map[key] = {
-            "token":  r["sym_id"],
-            "symbol": r["trad_symbol"],
-            "expiry": r["expiry"],
-        }
-        count += 1
+        sym_expiries = sorted(set(r["expiry"] for r in sym_records))
+        sym_nearest_expiry = sym_expiries[0]
+        
+        sym_expiry_records = [r for r in sym_records if r["expiry"] == sym_nearest_expiry]
+        for r in sym_expiry_records:
+            key = f"{r['symbol']}_{int(r['strike'])}_{r['option_type']}"
+            new_map[key] = {
+                "token":  r["sym_id"],
+                "symbol": r["trad_symbol"],
+                "expiry": r["expiry"],
+            }
+            count += 1
+        logging.info(f"[INSTRUMENT CACHE] Loaded {len(sym_expiry_records)} contracts for {sym} (nearest expiry: {sym_nearest_expiry})")
 
     # 7. Atomic swap
     with instrument_map_lock:
@@ -445,8 +449,7 @@ def build_instrument_map(force: bool = False) -> bool:
         INSTRUMENT_MAP_META["nifty_spot"]      = nifty_spot
         INSTRUMENT_MAP_META["banknifty_spot"]  = banknifty_spot
 
-    logging.info(f"[INSTRUMENT CACHE] Loaded {count} contracts")
-    logging.info(f"[INSTRUMENT CACHE] Nearest expiry: {nearest_expiry}")
+    logging.info(f"[INSTRUMENT CACHE] Total loaded {count} contracts across symbols")
     logging.info(f"[INSTRUMENT CACHE] NIFTY spot: {nifty_spot:.2f} | BANKNIFTY spot: {banknifty_spot:.2f}")
 
     # 8. Also store in Supabase for admin dashboard (non-critical)
@@ -623,15 +626,22 @@ def validate_instrument_master() -> dict:
 # ─────────────────────────────────────────────────────────────
 
 def _find_closest_strike(key_prefix: str, atm_strike: int, step: int, opt_type: str) -> str | None:
-    """Search ±5 steps from the desired strike for the closest match in instrument_map."""
+    """Find the closest strike available in instrument_map for the given index and option type."""
+    closest_key = None
+    min_diff = float('inf')
     with instrument_map_lock:
-        for offset in range(0, 6):
-            for sign in (1, -1) if offset > 0 else (1,):
-                test_strike = atm_strike + (sign * offset * step)
-                key = f"{key_prefix}_{test_strike}_{opt_type}"
-                if key in instrument_map:
-                    return key
-    return None
+        for key in instrument_map:
+            parts = key.split('_')
+            if len(parts) == 3 and parts[0] == key_prefix and parts[2] == opt_type:
+                try:
+                    strike_val = int(parts[1])
+                    diff = abs(strike_val - atm_strike)
+                    if diff < min_diff:
+                        min_diff = diff
+                        closest_key = key
+                except ValueError:
+                    continue
+    return closest_key
 
 
 def select_atm_option(
@@ -660,12 +670,17 @@ def select_atm_option(
         entry = instrument_map.get(cache_key)
 
     if entry is None:
-        # Fallback: scan ±5 strikes for closest match
+        # Fallback: scan closest match
         fallback_key = _find_closest_strike(index_upper, int(atm_strike), step, opt_type)
         if fallback_key is not None:
             with instrument_map_lock:
                 entry = instrument_map[fallback_key]
-            logging.info(f"[ATM LOOKUP] {cache_key} not found — closest: {fallback_key}")
+            fallback_strike = fallback_key.split('_')[1]
+            logging.info(
+                f"\nRequested: {atm_strike} {opt_type}\n"
+                f"Available: {fallback_strike} {opt_type}\n"
+                f"Using nearest strike: {fallback_strike} {opt_type}\n"
+            )
             cache_key = fallback_key
 
     if entry is not None:

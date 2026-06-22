@@ -342,7 +342,7 @@
     /* Strategy Selector Overhaul */
     .strategy-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
       gap: 12px;
       margin-top: 8px;
     }
@@ -586,6 +586,10 @@
           </div>
           <div class="strategy-card" id="card-strategy_two" onclick="selectStrategy('strategy_two')">
             <span class="strat-name">Strategy Two</span>
+            <span class="active-indicator">✅ ACTIVE</span>
+          </div>
+          <div class="strategy-card" id="card-strategy_three" onclick="selectStrategy('strategy_three')">
+            <span class="strat-name">Strategy Three</span>
             <span class="active-indicator">✅ ACTIVE</span>
           </div>
         </div>
@@ -963,6 +967,8 @@
 
       if (strategy === 'strategy_one') {
         modeOpt.textContent = "Default (SL 20 pts · Target 40 pts)";
+      } else if (strategy === 'strategy_three') {
+        modeOpt.textContent = "Default (SL 10 pts · Target 40 pts)";
       } else {
         modeOpt.textContent = "Default (Dynamic SL · 1:2 R:R)";
       }
@@ -986,13 +992,18 @@
       const sl = document.getElementById('sl').value;
       const tgt = document.getElementById('target').value;
 
-      document.getElementById('r-strategy').textContent = strategy === 'strategy_one' ? 'Strategy One' : 'Strategy Two';
+      let stratName = 'Strategy One';
+      if (strategy === 'strategy_two') stratName = 'Strategy Two';
+      else if (strategy === 'strategy_three') stratName = 'Strategy Three';
+      document.getElementById('r-strategy').textContent = stratName;
       document.getElementById('r-index').textContent = document.getElementById('index').value;
       document.getElementById('r-lots').textContent = document.getElementById('lots').value;
 
       if (mode === 'default') {
         if (strategy === 'strategy_one') {
           document.getElementById('r-sl-tgt').textContent = '20 / 40 (Premium)';
+        } else if (strategy === 'strategy_three') {
+          document.getElementById('r-sl-tgt').textContent = '10 / 40 (Premium)';
         } else {
           document.getElementById('r-sl-tgt').textContent = 'Dynamic (Premium)';
         }
@@ -1010,7 +1021,9 @@
       const sl = parseInt(document.getElementById('sl').value);
       const target = parseInt(document.getElementById('target').value);
 
-      const stratLabel = strategy === 'strategy_one' ? 'Strategy One' : 'Strategy Two';
+      let stratLabel = 'Strategy One';
+      if (strategy === 'strategy_two') stratLabel = 'Strategy Two';
+      else if (strategy === 'strategy_three') stratLabel = 'Strategy Three';
 
       const msg = `Deploy bot?\n\nStrategy: ${stratLabel}\nIndex: ${index}\nLots: ${lots}\nMode: ${mode === 'custom' ? `Custom (SL:${sl} / Target:${target} Premium Pts)` : 'Default'}`;
       if (!confirm(msg)) return;

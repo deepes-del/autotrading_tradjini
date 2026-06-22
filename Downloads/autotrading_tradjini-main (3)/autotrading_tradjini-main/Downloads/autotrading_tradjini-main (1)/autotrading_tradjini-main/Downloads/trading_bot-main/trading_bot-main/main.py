@@ -225,7 +225,14 @@ def _run_bot_logic(user_config: dict) -> None:
 
     symbol_token = "99926009" if user_index == "BANKNIFTY" else "99926000"
 
-    strat_display_name = "Strategy One" if user_strategy == "strategy_one" else "Strategy Two"
+    if user_strategy == "strategy_one":
+        strat_display_name = "Strategy One"
+    elif user_strategy == "strategy_two":
+        strat_display_name = "Strategy Two"
+    elif user_strategy == "strategy_three":
+        strat_display_name = "Strategy Three"
+    else:
+        strat_display_name = user_strategy
     print(f"[RUNNING] Bot active for user: {user_id} | index: {user_index} | strat: {strat_display_name} | lots: {user_lots}")
     logging.info(f"Initiating {user_index} {strat_display_name} Bot for user {user_id}...")
 
@@ -347,6 +354,10 @@ def _run_bot_logic(user_config: dict) -> None:
                     )
 
                 active_trade = None
+                with bot_lock:
+                    if user_id in running_bots:
+                        running_bots[user_id]["active_trade"] = None
+                add_log(user_id, "🛑 Trade Exited")
                 clear_setup(user_id)
             else:
                 add_log(user_id, "⏰ 3:10 PM — No open position. EOD check done.")
@@ -360,7 +371,7 @@ def _run_bot_logic(user_config: dict) -> None:
         global_df = data_fetcher.MARKET_DATA_CACHE.get(user_index)
         setup = data_fetcher.SHARED_SETUPS.get(user_index, {}).get(user_strategy)
 
-        if global_df is not None and not global_df.empty:
+        if user_strategy in ["strategy_one", "strategy_two"] and global_df is not None and not global_df.empty:
             latest = global_df.iloc[-1]
             s_time = setup['time'] if setup else (latest['timestamp_ist'] if 'timestamp_ist' in latest else global_df.index[-1])
 
@@ -438,6 +449,10 @@ def _run_bot_logic(user_config: dict) -> None:
                         log_error(user_id, "TARGET_SELL_FAILED", tgt_res.get("message", "Unknown"), raw=tgt_res.get("raw"), severity="ERROR")
                     
                     active_trade = None
+                    with bot_lock:
+                        if user_id in running_bots:
+                            running_bots[user_id]["active_trade"] = None
+                    add_log(user_id, "🛑 Trade Exited")
                     continue
 
                 # 3. Check if broker-side SL is hit/filled or needs backup execution
@@ -487,6 +502,10 @@ def _run_bot_logic(user_config: dict) -> None:
                     exit_val = sl_fill_price if sl_fill_price else active_trade["option_sl"]
                     close_broker_trade(user_id, exit_val, reason="SL_HIT")
                     active_trade = None
+                    with bot_lock:
+                        if user_id in running_bots:
+                            running_bots[user_id]["active_trade"] = None
+                    add_log(user_id, "🛑 Trade Exited")
                     continue
 
             time.sleep(1)
@@ -495,7 +514,7 @@ def _run_bot_logic(user_config: dict) -> None:
         # ── Entry phase (triggered by central signals) ─────────
         if active_trade is None:
             # Check setup for periodic logging
-            if setup:
+            if user_strategy in ["strategy_one", "strategy_two"] and setup:
                 if time.time() - last_log_time > 300:
                     add_log(user_id, f"🧠 Active Setup:\nWatching breakdown below {setup['low']:.2f}")
                     add_log(user_id, "⏳ Monitoring price...")
@@ -511,59 +530,24 @@ def _run_bot_logic(user_config: dict) -> None:
                         last_processed_signal_time = signal["timestamp"]
 
                         # Consume signal
-
-                        setup = signal["setup"]
-                        index_ltp = signal["entry_price"]
-
-                        add_log(user_id, f"🔥 Breakdown triggered at {index_ltp:.2f}")
-
-                        # 1. Calculate candle_range
-                        candle_range = setup['high'] - setup['low']
-
-                        if candle_range <= 0:
-                            add_log(user_id, "⚠️ Warning: invalid candle range. Skipping.")
-                            clear_setup(user_id)
-                        else:
-                            entry_price = setup['low']
-
-                            # SL/Target calculation supports both Default and Custom modes.
-                            if user_mode == "custom":
-                                sl_points = user_sl
-                                target_points = user_target
-                            else:
-                                if user_strategy == "strategy_two":
-                                    candle_size_val = setup.get("candle_size", candle_range)
-                                    sl_points = min(candle_size_val, 20)
-                                    target_points = 2 * sl_points
-                                    add_log(user_id, f"Strategy Two Setup Candle Size: {candle_size_val:.2f}")
-                                    add_log(user_id, f"Strategy Two SL Points: {sl_points:.2f}")
-                                else:
-                                    # Strategy One default logic
-                                    sl_points = min(candle_range, 20)
-                                    target_points = 2 * sl_points
-
-                            sl_price = entry_price + sl_points
-                            target_price = entry_price - target_points
-
-                            add_log(user_id, f"📊 Strategy Signal Detected (INDEX):\ncandle_range: {candle_range:.2f}\nentry_price: {entry_price:.2f}")
-
-                            # ── Read pre-selected instrument from central signal ──
+                        if user_strategy == "strategy_three":
                             opt_tok = signal.get("opt_tok")
                             opt_sym = signal.get("opt_sym")
                             option_ltp = signal.get("option_ltp")
-
-                            logging.info(f"[SHARED INSTRUMENT] User={user_id} Token={opt_tok} Symbol={opt_sym} LTP={option_ltp}")
-                            add_log(user_id, f"🔍 Instrument loaded from signal: tok={opt_tok} sym={opt_sym} ltp={option_ltp}")
-
+                            opt_type = signal.get("signal_type", "CE")
+                            atm_strike = signal.get("atm_strike")
+                            
+                            add_log(user_id, f"🔥 STRATEGY THREE {opt_type} signal detected for {user_index} ATM {atm_strike} | Option: {opt_sym}")
+                            
                             if opt_tok and option_ltp:
                                 # ── 1. Store Strategy Signal ──────────────────
                                 strat_id = store_strategy_trade(
                                     user_id=user_id,
                                     symbol=opt_sym,
                                     qty=trade_qty,
-                                    entry_price=entry_price, # Store index entry
-                                    sl=sl_price,             # Store index SL
-                                    target=target_price,     # Store index Target
+                                    entry_price=option_ltp,
+                                    sl=option_ltp - 10,
+                                    target=option_ltp + 40,
                                 )
 
                                 # ── 2. Place BUY and validate strictly ──────────────
@@ -573,8 +557,6 @@ def _run_bot_logic(user_config: dict) -> None:
 
                                 if buy_res.get("success"):
                                     buy_order_id = buy_res["order_id"]
-
-                                    # ── 3. Verify Order Status with Broker ──────────────
                                     order_details = order_manager.get_order_status(user_id, buy_order_id)
                                     order_status = str(order_details.get("status", "")).lower() if order_details else "unknown"
 
@@ -587,18 +569,8 @@ def _run_bot_logic(user_config: dict) -> None:
                                             opt_sl_pts = user_sl
                                             opt_tgt_pts = user_target
                                         else:
-                                            if user_strategy == "strategy_one":
-                                                opt_sl_pts = 20
-                                                opt_tgt_pts = 40
-                                            elif user_strategy == "strategy_two":
-                                                candle_size_val = setup.get("candle_size", setup['high'] - setup['low'])
-                                                opt_sl_pts = min(candle_size_val, 20)
-                                                opt_tgt_pts = opt_sl_pts * 2
-                                                add_log(user_id, f"Strategy Two Setup Candle Size: {candle_size_val:.2f}")
-                                                add_log(user_id, f"Strategy Two SL Points: {opt_sl_pts:.2f}")
-                                            else:
-                                                opt_sl_pts = 20
-                                                opt_tgt_pts = 40
+                                            opt_sl_pts = 10
+                                            opt_tgt_pts = 40
 
                                         opt_sl_price = round(executed_price - opt_sl_pts, 2)
                                         opt_target_price = round(executed_price + opt_tgt_pts, 2)
@@ -612,8 +584,8 @@ def _run_bot_logic(user_config: dict) -> None:
                                             symbol=opt_sym,
                                             qty=trade_qty,
                                             executed_price=executed_price,
-                                            sl=opt_sl_price,        # Store Option SL
-                                            target=opt_target_price, # Store Option Target
+                                            sl=opt_sl_price,
+                                            target=opt_target_price,
                                             broker_order_id=buy_order_id,
                                         )
 
@@ -634,24 +606,26 @@ def _run_bot_logic(user_config: dict) -> None:
                                             "opt_tok":      opt_tok,
                                             "opt_sym":      opt_sym,
                                             "trade_qty":    trade_qty,
-                                            "entry_price":  executed_price, # Option price
+                                            "entry_price":  executed_price,
                                             "option_sl":    opt_sl_price,
                                             "option_target": opt_target_price,
                                             "buy_order_id": buy_order_id,
                                             "sl_order_id":  sl_order_id,
                                         }
+                                        with bot_lock:
+                                            if user_id in running_bots:
+                                                running_bots[user_id]["active_trade"] = active_trade
+                                        add_log(user_id, "✅ Trade Entered")
 
                                         trades_today += 1
                                         clear_setup(user_id)
                                     else:
-                                        # Broker rejected order or it wasn't filled
                                         msg = f"Order {buy_order_id} not executed. Status: {order_status}"
                                         add_log(user_id, f"❌ {msg}")
                                         logging.error(f"[BUY FAILED EXECUTION] user={user_id} | {msg}")
                                         log_error(user_id, "ORDER_NOT_FILLED", msg, raw=order_details, severity="ERROR")
                                         clear_setup(user_id)
                                 else:
-                                    # BUY failed — do NOT mark trade as active
                                     add_log(user_id, f"❌ BUY order failed: {buy_res.get('message')}")
                                     logging.error(f"[BUY FAIL] user={user_id} | msg={buy_res.get('message')} | raw={buy_res.get('raw')}")
                                     log_error(
@@ -662,18 +636,175 @@ def _run_bot_logic(user_config: dict) -> None:
                                     )
                                     clear_setup(user_id)
                             else:
-                                reason = []
-                                if not opt_tok:
-                                    reason.append("No ATM token found in instrument list")
-                                elif not option_ltp:
-                                    from session_manager import has_session
-                                    if not has_session(user_id):
-                                        reason.append("ATM token found successfully but option LTP fetch failed due to broker authentication failure.")
-                                    else:
-                                        reason.append(f"ATM token found successfully but option LTP fetch failed for token={opt_tok} sym={opt_sym}")
-                                add_log(user_id, f"❌ Failed to fetch option data — {'; '.join(reason) if reason else 'Unknown reason'}")
-                                add_log(user_id, "⚠️ Check: broker session valid? NFO instruments loaded? Market open for options?")
+                                add_log(user_id, f"❌ Failed to fetch option data for Strategy Three signal")
                                 clear_setup(user_id)
+                        else:
+                            setup = signal["setup"]
+                            index_ltp = signal["entry_price"]
+
+                            add_log(user_id, f"🔥 Breakdown triggered at {index_ltp:.2f}")
+
+                            # 1. Calculate candle_range
+                            candle_range = setup['high'] - setup['low']
+
+                            if candle_range <= 0:
+                                add_log(user_id, "⚠️ Warning: invalid candle range. Skipping.")
+                                clear_setup(user_id)
+                            else:
+                                entry_price = setup['low']
+
+                                # SL/Target calculation supports both Default and Custom modes.
+                                if user_mode == "custom":
+                                    sl_points = user_sl
+                                    target_points = user_target
+                                else:
+                                    if user_strategy == "strategy_two":
+                                        candle_size_val = setup.get("candle_size", candle_range)
+                                        sl_points = min(candle_size_val, 20)
+                                        target_points = 2 * sl_points
+                                        add_log(user_id, f"Strategy Two Setup Candle Size: {candle_size_val:.2f}")
+                                        add_log(user_id, f"Strategy Two SL Points: {sl_points:.2f}")
+                                    else:
+                                        # Strategy One default logic
+                                        sl_points = min(candle_range, 20)
+                                        target_points = 2 * sl_points
+
+                                sl_price = entry_price + sl_points
+                                target_price = entry_price - target_points
+
+                                add_log(user_id, f"📊 Strategy Signal Detected (INDEX):\ncandle_range: {candle_range:.2f}\nentry_price: {entry_price:.2f}")
+
+                                # ── Read pre-selected instrument from central signal ──
+                                opt_tok = signal.get("opt_tok")
+                                opt_sym = signal.get("opt_sym")
+                                option_ltp = signal.get("option_ltp")
+
+                                logging.info(f"[SHARED INSTRUMENT] User={user_id} Token={opt_tok} Symbol={opt_sym} LTP={option_ltp}")
+                                add_log(user_id, f"🔍 Instrument loaded from signal: tok={opt_tok} sym={opt_sym} ltp={option_ltp}")
+
+                                if opt_tok and option_ltp:
+                                    # ── 1. Store Strategy Signal ──────────────────
+                                    strat_id = store_strategy_trade(
+                                        user_id=user_id,
+                                        symbol=opt_sym,
+                                        qty=trade_qty,
+                                        entry_price=entry_price, # Store index entry
+                                        sl=sl_price,             # Store index SL
+                                        target=target_price,     # Store index Target
+                                    )
+
+                                    # ── 2. Place BUY and validate strictly ──────────────
+                                    buy_res = order_manager.place_buy_order(
+                                        user_id, opt_tok, opt_sym, trade_qty
+                                    )
+
+                                    if buy_res.get("success"):
+                                        buy_order_id = buy_res["order_id"]
+
+                                        # ── 3. Verify Order Status with Broker ──────────────
+                                        order_details = order_manager.get_order_status(user_id, buy_order_id)
+                                        order_status = str(order_details.get("status", "")).lower() if order_details else "unknown"
+
+                                        if order_status in ["complete", "completed", "executed"]:
+                                            executed_price = float(order_details.get("avgPrice") or order_details.get("price") or option_ltp)
+                                            add_log(user_id, f"✅ BUY executed at {executed_price:.2f} | Order: {buy_order_id}")
+
+                                            # ── 4. Calculate Premium SL/Target ──────────────
+                                            if user_mode == "custom":
+                                                opt_sl_pts = user_sl
+                                                opt_tgt_pts = user_target
+                                            else:
+                                                if user_strategy == "strategy_one":
+                                                    opt_sl_pts = 20
+                                                    opt_tgt_pts = 40
+                                                elif user_strategy == "strategy_two":
+                                                    candle_size_val = setup.get("candle_size", setup['high'] - setup['low'])
+                                                    opt_sl_pts = min(candle_size_val, 20)
+                                                    opt_tgt_pts = opt_sl_pts * 2
+                                                    add_log(user_id, f"Strategy Two Setup Candle Size: {candle_size_val:.2f}")
+                                                    add_log(user_id, f"Strategy Two SL Points: {opt_sl_pts:.2f}")
+                                                else:
+                                                    opt_sl_pts = 20
+                                                    opt_tgt_pts = 40
+
+                                            opt_sl_price = round(executed_price - opt_sl_pts, 2)
+                                            opt_target_price = round(executed_price + opt_tgt_pts, 2)
+
+                                            add_log(user_id, f"💰 Premium SL: {opt_sl_price} | Target: {opt_target_price}")
+
+                                            # ── 5. Store Real Broker Execution ──────────────
+                                            store_broker_trade(
+                                                user_id=user_id,
+                                                strategy_trade_id=strat_id,
+                                                symbol=opt_sym,
+                                                qty=trade_qty,
+                                                executed_price=executed_price,
+                                                sl=opt_sl_price,        # Store Option SL
+                                                target=opt_target_price, # Store Option Target
+                                                broker_order_id=buy_order_id,
+                                            )
+
+                                            # ── 5.5 Place Stop-Loss Order at Broker ──────────────
+                                            add_log(user_id, f"📤 Placing Stoploss order at broker for {opt_sl_price:.2f}...")
+                                            sl_res = order_manager.place_sl_order(
+                                                user_id, opt_tok, opt_sym, trade_qty, opt_sl_price
+                                            )
+                                            sl_order_id = "UNKNOWN"
+                                            if sl_res.get("success"):
+                                                sl_order_id = sl_res["order_id"]
+                                                add_log(user_id, f"✅ Stoploss order placed at broker | Order ID: {sl_order_id}")
+                                            else:
+                                                add_log(user_id, f"⚠️ Failed to place SL at broker! Error: {sl_res.get('message')} — BOT WILL MONITOR AS BACKUP")
+
+                                            # Mark trade active ONLY after confirmed BUY execution
+                                            active_trade = {
+                                                "opt_tok":      opt_tok,
+                                                "opt_sym":      opt_sym,
+                                                "trade_qty":    trade_qty,
+                                                "entry_price":  executed_price, # Option price
+                                                "option_sl":    opt_sl_price,
+                                                "option_target": opt_target_price,
+                                                "buy_order_id": buy_order_id,
+                                                "sl_order_id":  sl_order_id,
+                                            }
+                                            with bot_lock:
+                                                if user_id in running_bots:
+                                                    running_bots[user_id]["active_trade"] = active_trade
+                                            add_log(user_id, "✅ Trade Entered")
+
+                                            trades_today += 1
+                                            clear_setup(user_id)
+                                        else:
+                                            # Broker rejected order or it wasn't filled
+                                            msg = f"Order {buy_order_id} not executed. Status: {order_status}"
+                                            add_log(user_id, f"❌ {msg}")
+                                            logging.error(f"[BUY FAILED EXECUTION] user={user_id} | {msg}")
+                                            log_error(user_id, "ORDER_NOT_FILLED", msg, raw=order_details, severity="ERROR")
+                                            clear_setup(user_id)
+                                    else:
+                                        # BUY failed — do NOT mark trade as active
+                                        add_log(user_id, f"❌ BUY order failed: {buy_res.get('message')}")
+                                        logging.error(f"[BUY FAIL] user={user_id} | msg={buy_res.get('message')} | raw={buy_res.get('raw')}")
+                                        log_error(
+                                            user_id, "ORDER_FAILED",
+                                            buy_res.get("message", "Unknown broker error"),
+                                            raw=buy_res.get("raw"),
+                                            severity="ERROR",
+                                        )
+                                        clear_setup(user_id)
+                                else:
+                                    reason = []
+                                    if not opt_tok:
+                                        reason.append("No ATM token found in instrument list")
+                                    elif not option_ltp:
+                                        from session_manager import has_session
+                                        if not has_session(user_id):
+                                            reason.append("ATM token found successfully but option LTP fetch failed due to broker authentication failure.")
+                                        else:
+                                            reason.append(f"ATM token found successfully but option LTP fetch failed for token={opt_tok} sym={opt_sym}")
+                                    add_log(user_id, f"❌ Failed to fetch option data — {'; '.join(reason) if reason else 'Unknown reason'}")
+                                    add_log(user_id, "⚠️ Check: broker session valid? NFO instruments loaded? Market open for options?")
+                                    clear_setup(user_id)
 
         time.sleep(1)
 

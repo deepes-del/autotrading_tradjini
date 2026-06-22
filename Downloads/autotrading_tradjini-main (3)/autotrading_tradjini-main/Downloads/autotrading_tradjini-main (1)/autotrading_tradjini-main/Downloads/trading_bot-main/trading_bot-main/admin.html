@@ -243,7 +243,13 @@ async function fetchUsers() {
       const detailBtn   = `<button class="btn btn-ghost" style="padding:5px 10px;font-size:.78rem" onclick="openDetail('${u.user_id}','${u.name}')">🔍 View</button>`;
       const deleteBtn   = `<button class="btn btn-danger" style="padding:5px 10px;font-size:.78rem" onclick="deleteUser('${u.user_id}','${u.name}')">🗑</button>`;
       const botStatusStr = u.bot_running ? '🟢 Running' : '⚫ Idle';
-      const stratName = u.active_strategy ? (u.active_strategy === 'strategy_one' ? 'Strat 1' : 'Strat 2') : '—';
+      let stratName = '—';
+      if (u.active_strategy) {
+        if (u.active_strategy === 'strategy_one') stratName = 'Strat 1';
+        else if (u.active_strategy === 'strategy_two') stratName = 'Strat 2';
+        else if (u.active_strategy === 'strategy_three') stratName = 'Strat 3';
+        else stratName = u.active_strategy;
+      }
       const configStr = u.active_mode ? `${u.active_mode === 'custom' ? 'Custom' : 'Default'} (${u.active_sl}/${u.active_target})` : '—';
       const brokerStatus = u.broker_configured 
         ? `<span class="badge badge-approved">Configured</span>`

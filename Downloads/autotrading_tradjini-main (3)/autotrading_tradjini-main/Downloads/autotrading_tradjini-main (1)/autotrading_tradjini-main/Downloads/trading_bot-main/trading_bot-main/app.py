@@ -899,24 +899,35 @@ def admin_instrument_status(admin_token: str):
 def _daily_instrument_scheduler():
     """
     Background thread that runs forever, waking up periodically to check
-    if it's time (08:00 AM IST) to refresh instruments.
+    if it's time (08:00 AM IST) to refresh instruments or if 30 minutes have passed.
     """
     import time
     from order_manager import IST, build_instrument_map
     import datetime
 
-    logging.info("[SCHEDULER] Daily instrument refresh scheduler started.")
+    logging.info("[SCHEDULER] Daily and periodic 30-minute instrument refresh scheduler started.")
+    last_periodic_refresh = time.time()
+    
     while True:
         try:
             now = datetime.datetime.now(IST)
             # Run at 08:00 AM IST
             if now.hour == 8 and now.minute == 0:
+                logging.info("[SCHEDULER] Running daily morning refresh...")
                 build_instrument_map(force=True)
+                last_periodic_refresh = time.time()
+                time.sleep(60) # avoid running multiple times in the same minute
+                continue
+                
+            # Run every 30 minutes
+            if time.time() - last_periodic_refresh >= 1800:
+                logging.info("[SCHEDULER] Running periodic 30-minute refresh...")
+                build_instrument_map(force=True)
+                last_periodic_refresh = time.time()
         except Exception as exc:
-            logging.error(f"[SCHEDULER] Error in daily scheduler loop: {exc}")
+            logging.error(f"[SCHEDULER] Error in scheduler loop: {exc}")
         
-        # Sleep for 30 seconds
-        time.sleep(30)
+        time.sleep(10)
 
 
 def validate_active_sessions_startup():
