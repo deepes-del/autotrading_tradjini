@@ -496,7 +496,7 @@ def _market_data_engine_loop():
                                         last_candle = opt_df_trimmed.iloc[-1]
                                         last_ts = last_candle['timestamp_ist']
                                         
-                                        if state.get("last_failed_setup_timestamp") == last_ts:
+                                        if state.get("last_setup_timestamp") == last_ts or state.get("last_failed_setup_timestamp") == last_ts:
                                             continue
                                             
                                         last_ema = float(last_candle['EMA21'])
@@ -504,12 +504,13 @@ def _market_data_engine_loop():
                                         if opt_type == "CE":
                                             setup_match = strategy_three.check_setup_ce(float(last_candle['low']), float(last_candle['close']), last_ema)
                                         else:
-                                            setup_match = strategy_three.check_setup_pe(float(last_candle['high']), float(last_candle['close']), last_ema)
+                                            setup_match = strategy_three.check_setup_pe(float(last_candle['low']), float(last_candle['close']), last_ema)
                                             
                                         if setup_match:
                                             state["state"] = "WAIT_CONFIRMATION"
                                             state["setup_timestamp"] = last_ts
                                             state["setup_ema"] = last_ema
+                                            state["last_setup_timestamp"] = last_ts
                                             state["locked_strike"] = atm_strike
                                             state["locked_token"] = opt_token
                                             state["locked_symbol"] = opt_symbol
@@ -517,7 +518,7 @@ def _market_data_engine_loop():
                                             state["signal_time"] = None
                                             state["trade_entered"] = False
                                             
-                                            broadcast_strategy_three_log(f"🧠 Setup Detected | {index_name} {opt_type} at {last_ts.strftime('%H:%M')} (Option: {opt_symbol})")
+                                            broadcast_strategy_three_log(f"[SETUP DETECTED] | {index_name} {opt_type} at {last_ts.strftime('%H:%M')} (Option: {opt_symbol})")
                                             
                                 elif state["state"] == "WAIT_CONFIRMATION":
                                     opt_token = state["locked_token"]
@@ -535,46 +536,53 @@ def _market_data_engine_loop():
                                         if state.get("evaluated_open_timestamp") != last_ts:
                                             state["evaluated_open_timestamp"] = last_ts
                                             
+                                            # Calculate current EMA21 on series including forming candle
+                                            opt_df_with_ema = opt_df.copy()
+                                            if len(opt_df_with_ema) >= 22:
+                                                opt_df_with_ema['EMA21'] = strategy_three.calculate_ema21(opt_df_with_ema)
+                                                current_ema21 = float(opt_df_with_ema['EMA21'].iloc[-1])
+                                            else:
+                                                current_ema21 = setup_ema
+                                                
                                             open_price = float(opt_df['open'].iloc[-1])
                                             
                                             trigger_signal = False
-                                            if opt_type == "CE":
-                                                if open_price > setup_ema:
-                                                    trigger_signal = True
-                                            else: # PE
-                                                if open_price < setup_ema:
-                                                    trigger_signal = True
+                                            if open_price > current_ema21:
+                                                trigger_signal = True
                                                     
                                             if trigger_signal:
-                                                broadcast_strategy_three_log(f"🔥 Signal Generated | {index_name} {opt_type} | Strike: {atm_strike} | Entry: {open_price:.2f} | SL: {open_price - 10:.2f} | Tgt: {open_price + 40:.2f}")
-                                                
-                                                with market_cache_lock:
-                                                    SHARED_SIGNALS[index_name]["strategy_three"] = {
-                                                        "strategy_name": "strategy_three",
-                                                        "signal_type": opt_type,
-                                                        "option_symbol": opt_symbol,
-                                                        "option_token": opt_token,
-                                                        "atm_strike": atm_strike,
-                                                        "entry_price": open_price,
-                                                        "stoploss": open_price - 10,
-                                                        "target": open_price + 40,
-                                                        "signal_timestamp": time.time(),
-                                                        "timestamp": time.time(),
-                                                        "opt_tok": opt_token,
-                                                        "opt_sym": opt_symbol,
-                                                        "option_ltp": open_price,
-                                                        "setup": {
-                                                            "time": setup_ts,
-                                                            "ema": setup_ema
+                                                if state.get("last_signal_timestamp") != last_ts:
+                                                    state["last_signal_timestamp"] = last_ts
+                                                    
+                                                    broadcast_strategy_three_log(f"[BUY SIGNAL GENERATED] | {index_name} {opt_type} | Strike: {atm_strike} | Entry: {open_price:.2f} | SL: {open_price - 10:.2f} | Tgt: {open_price + 40:.2f}")
+                                                    
+                                                    with market_cache_lock:
+                                                        SHARED_SIGNALS[index_name]["strategy_three"] = {
+                                                            "strategy_name": "strategy_three",
+                                                            "signal_type": opt_type,
+                                                            "option_symbol": opt_symbol,
+                                                            "option_token": opt_token,
+                                                            "atm_strike": atm_strike,
+                                                            "entry_price": open_price,
+                                                            "stoploss": open_price - 10,
+                                                            "target": open_price + 40,
+                                                            "signal_timestamp": time.time(),
+                                                            "timestamp": time.time(),
+                                                            "opt_tok": opt_token,
+                                                            "opt_sym": opt_symbol,
+                                                            "option_ltp": open_price,
+                                                            "setup": {
+                                                                "time": setup_ts,
+                                                                "ema": current_ema21
+                                                            }
                                                         }
-                                                    }
-                                                
-                                                state["state"] = "TRADE_ACTIVE"
-                                                state["signal_generated"] = True
-                                                state["signal_time"] = time.time()
-                                                state["trade_entered"] = False
+                                                    
+                                                    state["state"] = "TRADE_ACTIVE"
+                                                    state["signal_generated"] = True
+                                                    state["signal_time"] = time.time()
+                                                    state["trade_entered"] = False
                                             else:
-                                                broadcast_strategy_three_log(f"❌ Next candle open ({open_price:.2f}) did not trigger for {index_name} {opt_type}. Resetting setup.")
+                                                broadcast_strategy_three_log(f"❌ Next candle open ({open_price:.2f}) did not trigger for {index_name} {opt_type} (EMA: {current_ema21:.2f}). Resetting setup.")
                                                 state["state"] = "WAIT_SETUP"
                                                 state["last_failed_setup_timestamp"] = setup_ts
                                                 state["setup_timestamp"] = None
@@ -591,7 +599,7 @@ def _market_data_engine_loop():
                                     if is_active:
                                         if not state["trade_entered"]:
                                             state["trade_entered"] = True
-                                            broadcast_strategy_three_log(f"✅ Trade Entered | {index_name} {opt_type} (Option: {state['locked_symbol']})")
+                                            broadcast_strategy_three_log(f"[ENTRY TRIGGERED] | {index_name} {opt_type} (Option: {state['locked_symbol']})")
                                     else:
                                         should_reset = False
                                         if state["trade_entered"]:

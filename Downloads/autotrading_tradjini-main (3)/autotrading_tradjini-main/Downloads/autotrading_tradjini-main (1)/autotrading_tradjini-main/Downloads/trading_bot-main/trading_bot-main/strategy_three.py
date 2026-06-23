@@ -9,11 +9,11 @@ def check_setup_ce(setup_low: float, setup_close: float, setup_ema: float) -> bo
     """
     return setup_low < setup_ema and setup_close > setup_ema
 
-def check_setup_pe(setup_high: float, setup_close: float, setup_ema: float) -> bool:
+def check_setup_pe(setup_low: float, setup_close: float, setup_ema: float) -> bool:
     """
-    PE Setup Candle: high > EMA21 AND close < EMA21
+    PE Setup Candle: low < EMA21 AND close > EMA21
     """
-    return setup_high > setup_ema and setup_close < setup_ema
+    return setup_low < setup_ema and setup_close > setup_ema
 
 def calculate_ema21(df: pd.DataFrame) -> pd.Series:
     """

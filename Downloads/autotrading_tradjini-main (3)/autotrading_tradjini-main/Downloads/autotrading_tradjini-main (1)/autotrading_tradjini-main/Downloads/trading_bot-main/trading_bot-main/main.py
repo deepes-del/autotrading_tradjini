@@ -540,14 +540,22 @@ def _run_bot_logic(user_config: dict) -> None:
                             add_log(user_id, f"🔥 STRATEGY THREE {opt_type} signal detected for {user_index} ATM {atm_strike} | Option: {opt_sym}")
                             
                             if opt_tok and option_ltp:
-                                # ── 1. Store Strategy Signal ──────────────────
+                                # ── 1. Calculate Premium SL/Target Points ──
+                                if user_mode == "custom":
+                                    opt_sl_pts = user_sl
+                                    opt_tgt_pts = user_target
+                                else:
+                                    opt_sl_pts = 10
+                                    opt_tgt_pts = 40
+
+                                # ── 1.1 Store Strategy Signal ──────────────────
                                 strat_id = store_strategy_trade(
                                     user_id=user_id,
                                     symbol=opt_sym,
                                     qty=trade_qty,
                                     entry_price=option_ltp,
-                                    sl=option_ltp - 10,
-                                    target=option_ltp + 40,
+                                    sl=option_ltp - opt_sl_pts,
+                                    target=option_ltp + opt_tgt_pts,
                                 )
 
                                 # ── 2. Place BUY and validate strictly ──────────────
@@ -565,15 +573,6 @@ def _run_bot_logic(user_config: dict) -> None:
                                         add_log(user_id, f"✅ BUY executed at {executed_price:.2f} | Order: {buy_order_id}")
 
                                         # ── 4. Calculate Premium SL/Target ──────────────
-                                        if user_strategy == "strategy_three":
-                                            opt_sl_pts = 10
-                                            opt_tgt_pts = 40
-                                        elif user_mode == "custom":
-                                            opt_sl_pts = user_sl
-                                            opt_tgt_pts = user_target
-                                        else:
-                                            opt_sl_pts = 10
-                                            opt_tgt_pts = 40
 
                                         opt_sl_price = round(executed_price - opt_sl_pts, 2)
                                         opt_target_price = round(executed_price + opt_tgt_pts, 2)
