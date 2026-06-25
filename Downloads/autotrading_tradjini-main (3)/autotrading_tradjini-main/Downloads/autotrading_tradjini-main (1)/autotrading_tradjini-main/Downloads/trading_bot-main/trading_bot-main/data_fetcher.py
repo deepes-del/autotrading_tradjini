@@ -532,7 +532,9 @@ def _market_data_engine_loop():
                                         continue
                                     
                                     last_ts = opt_df['timestamp_ist'].iloc[-1]
-                                    if last_ts >= setup_ts + datetime.timedelta(minutes=5):
+                                    expected_confirm_ts = setup_ts + datetime.timedelta(minutes=5)
+                                    
+                                    if last_ts == expected_confirm_ts:
                                         if state.get("evaluated_open_timestamp") != last_ts:
                                             state["evaluated_open_timestamp"] = last_ts
                                             
@@ -546,9 +548,7 @@ def _market_data_engine_loop():
                                                 
                                             open_price = float(opt_df['open'].iloc[-1])
                                             
-                                            trigger_signal = False
-                                            if open_price > current_ema21:
-                                                trigger_signal = True
+                                            trigger_signal = open_price > current_ema21
                                                     
                                             if trigger_signal:
                                                 if state.get("last_signal_timestamp") != last_ts:
@@ -593,6 +593,19 @@ def _market_data_engine_loop():
                                                 state["signal_generated"] = False
                                                 state["signal_time"] = None
                                                 state["trade_entered"] = False
+                                                
+                                    elif last_ts > expected_confirm_ts:
+                                        broadcast_strategy_three_log(f"❌ Current candle {last_ts.strftime('%H:%M')} is past the expected next candle {expected_confirm_ts.strftime('%H:%M')}. Resetting setup.")
+                                        state["state"] = "WAIT_SETUP"
+                                        state["last_failed_setup_timestamp"] = setup_ts
+                                        state["setup_timestamp"] = None
+                                        state["setup_ema"] = None
+                                        state["locked_strike"] = None
+                                        state["locked_token"] = None
+                                        state["locked_symbol"] = None
+                                        state["signal_generated"] = False
+                                        state["signal_time"] = None
+                                        state["trade_entered"] = False
                                             
                                 elif state["state"] == "TRADE_ACTIVE":
                                     is_active = is_strategy_three_trade_active(index_name, opt_type)
