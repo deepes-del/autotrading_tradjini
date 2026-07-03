@@ -1,0 +1,6 @@
+{
+  "name": "JobHai",
+  "description": "Candidate registration, login, profile setup, and dashboard for logistics job applicants.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
