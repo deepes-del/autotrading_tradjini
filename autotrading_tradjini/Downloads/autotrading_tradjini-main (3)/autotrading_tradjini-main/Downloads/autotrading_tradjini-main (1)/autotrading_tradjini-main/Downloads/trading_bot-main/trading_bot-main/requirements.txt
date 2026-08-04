@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+pandas
+numpy
+yfinance
+requests
+python-dotenv
+supabase
+pyotp
+python-multipart
+pytz
+passlib[bcrypt]
+bcrypt
+websocket-client
+websockets
+httpx
